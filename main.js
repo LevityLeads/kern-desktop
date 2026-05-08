@@ -3,7 +3,7 @@ const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 
-const KERN_URL = 'https://kern.levityleads.com';
+const KERN_URL = 'https://kern-interface.vercel.app';
 
 // ------------------------------------------------------------------
 // Simple JSON store (avoids ESM issues with electron-store v8+)
