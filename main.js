@@ -124,10 +124,31 @@ function createWindow() {
   // Inject CSS to make body translucent so Mica bleeds through
   // ------------------------------------
   mainWindow.webContents.on('did-finish-load', () => {
+    // Inject transparency + drag region
     mainWindow.webContents.insertCSS(`
       body,
       .fixed.inset-0 {
-        background-color: rgba(15, 10, 25, 0.85) !important;
+        background-color: rgba(15, 10, 25, 0.75) !important;
+      }
+    `);
+
+    // Inject a fixed drag bar at the top of the page for window movement.
+    // Sits behind the native titlebar overlay buttons (top-right).
+    mainWindow.webContents.executeJavaScript(`
+      if (!document.getElementById('kern-drag-bar')) {
+        const bar = document.createElement('div');
+        bar.id = 'kern-drag-bar';
+        bar.style.cssText = [
+          'position: fixed',
+          'top: 0',
+          'left: 0',
+          'right: 0',
+          'height: 36px',
+          'z-index: 99999',
+          '-webkit-app-region: drag',
+          'pointer-events: auto',
+        ].join(';');
+        document.body.appendChild(bar);
       }
     `);
   });
