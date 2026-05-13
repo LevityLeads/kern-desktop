@@ -124,8 +124,11 @@ function createWindow() {
   // Inject CSS to make body translucent so Mica bleeds through
   // ------------------------------------
   mainWindow.webContents.on('did-finish-load', () => {
-    // Inject transparency + drag region
+    // Inject transparency + drag region + titlebar inset variable
     mainWindow.webContents.insertCSS(`
+      :root {
+        --titlebar-inset-right: 140px;
+      }
       body,
       .fixed.inset-0 {
         background-color: rgba(15, 10, 25, 0.75) !important;
