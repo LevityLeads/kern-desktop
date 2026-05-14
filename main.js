@@ -124,14 +124,47 @@ function createWindow() {
   // Inject CSS to make body translucent so Mica bleeds through
   // ------------------------------------
   mainWindow.webContents.on('did-finish-load', () => {
-    // Inject transparency + drag region + titlebar inset variable
+    // Inject transparency + drag region + titlebar inset variable.
+    // Override the opaque dark theme backgrounds so the Windows 11
+    // Acrylic material bleeds through. Each layer needs its own
+    // alpha or the effect gets buried under opaque paint.
     mainWindow.webContents.insertCSS(`
       :root {
         --titlebar-inset-right: 140px;
       }
+
+      /* Base surfaces: let acrylic show through */
       body,
       .fixed.inset-0 {
-        background-color: rgba(15, 10, 25, 0.75) !important;
+        background-color: rgba(15, 10, 25, 0.70) !important;
+      }
+
+      /* Sidebar and content panels: semi-transparent */
+      .glass-panel {
+        background: rgba(20, 14, 35, 0.55) !important;
+        backdrop-filter: blur(16px) !important;
+      }
+
+      /* Glass surface (thread area) */
+      .glass-surface {
+        background: rgba(15, 10, 28, 0.40) !important;
+        backdrop-filter: blur(20px) !important;
+      }
+
+      /* Card backgrounds (message bubbles, session cards) */
+      .bg-card,
+      [class*="bg-card"] {
+        background-color: rgba(22, 16, 38, 0.60) !important;
+      }
+
+      /* Purple glow: reduce opacity so it doesn't block acrylic */
+      .bg-purple-glow::before {
+        opacity: 0.5 !important;
+      }
+
+      /* Sessions panel right side */
+      .border-l.border-border.glass-panel {
+        background: rgba(18, 12, 32, 0.50) !important;
       }
     `);
 
