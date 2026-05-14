@@ -133,38 +133,61 @@ function createWindow() {
         --titlebar-inset-right: 140px;
       }
 
-      /* Base surfaces: let acrylic show through */
-      body,
+      /* Kill ALL opaque backgrounds. Layers stack multiplicatively,
+         so even 0.5 + 0.5 = nearly opaque. Make everything very
+         thin and let acrylic do the heavy lifting. */
+
+      body {
+        background-color: transparent !important;
+      }
+
+      /* The outermost grid container */
       .fixed.inset-0 {
-        background-color: rgba(15, 10, 25, 0.70) !important;
+        background-color: rgba(10, 6, 20, 0.45) !important;
       }
 
-      /* Sidebar and content panels: semi-transparent */
-      .glass-panel {
-        background: rgba(20, 14, 35, 0.55) !important;
-        backdrop-filter: blur(16px) !important;
-      }
-
-      /* Glass surface (thread area) */
-      .glass-surface {
-        background: rgba(15, 10, 28, 0.40) !important;
-        backdrop-filter: blur(20px) !important;
-      }
-
-      /* Card backgrounds (message bubbles, session cards) */
-      .bg-card,
-      [class*="bg-card"] {
-        background-color: rgba(22, 16, 38, 0.60) !important;
-      }
-
-      /* Purple glow: reduce opacity so it doesn't block acrylic */
+      /* Purple glow pseudo: tone way down */
       .bg-purple-glow::before {
-        opacity: 0.5 !important;
+        opacity: 0.3 !important;
       }
 
-      /* Sessions panel right side */
+      /* Sidebar, headers, input bars */
+      .glass-panel {
+        background: rgba(15, 10, 28, 0.30) !important;
+      }
+
+      /* Thread content area */
+      .glass-surface {
+        background: rgba(10, 6, 22, 0.15) !important;
+      }
+
+      /* Message bubbles, cards */
+      .bg-card,
+      .bg-card\\/80,
+      .bg-card\\/60,
+      .bg-card\\/40,
+      [class*="bg-card"] {
+        background-color: rgba(18, 12, 32, 0.35) !important;
+      }
+
+      /* Secondary surfaces (hover states, badges) */
+      .bg-secondary,
+      .bg-secondary\\/40,
+      .bg-secondary\\/30,
+      [class*="bg-secondary"] {
+        background-color: rgba(25, 18, 40, 0.30) !important;
+      }
+
+      /* Sessions panel */
       .border-l.border-border.glass-panel {
-        background: rgba(18, 12, 32, 0.50) !important;
+        background: rgba(12, 8, 24, 0.35) !important;
+      }
+
+      /* Borders: make them more subtle so they don't create hard lines */
+      .border-border,
+      .border-b,
+      .border-l {
+        border-color: rgba(255, 255, 255, 0.06) !important;
       }
     `);
 
