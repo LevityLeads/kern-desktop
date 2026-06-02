@@ -1,0 +1,40 @@
+name: Build & Release (Windows)
+
+# Builds the Windows NSIS installer on a clean Windows runner and publishes
+# it as a GitHub Release (with latest.yml for electron-updater auto-updates).
+#
+# Trigger:
+#   - manually via the Actions tab / API (workflow_dispatch)
+#   - automatically when a tag like v1.0.1 is pushed
+#
+# The release tag/version comes from package.json "version".
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build and publish Windows installer
+        env:
+          # electron-builder reads GH_TOKEN to publish the release.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish always
