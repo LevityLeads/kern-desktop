@@ -1,9 +1,59 @@
 const { app, BrowserWindow, Tray, Menu, shell, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
 const KERN_URL = 'https://kern-interface.vercel.app';
+
+// ------------------------------------------------------------------
+// Open external links in Google Chrome, not the OS default browser.
+// Falls back to the OS default (shell.openExternal) if Chrome isn't
+// found or fails to launch.
+// ------------------------------------------------------------------
+function launchChrome(url) {
+  const platform = process.platform;
+  let cmd;
+  let args;
+
+  if (platform === 'win32') {
+    const candidates = [
+      path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(process.env['LOCALAPPDATA'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ];
+    cmd = candidates.find((c) => {
+      try {
+        return c && fs.existsSync(c);
+      } catch {
+        return false;
+      }
+    });
+    if (!cmd) return false; // Chrome not installed, let caller fall back
+    args = [url];
+  } else if (platform === 'darwin') {
+    cmd = 'open';
+    args = ['-a', 'Google Chrome', url];
+  } else {
+    cmd = 'google-chrome';
+    args = [url];
+  }
+
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    // If the launch fails asynchronously (e.g. Chrome missing on
+    // mac/linux), fall back to the OS default browser.
+    child.once('error', () => shell.openExternal(url));
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openExternalUrl(url) {
+  if (!launchChrome(url)) shell.openExternal(url);
+}
 
 // ------------------------------------------------------------------
 // Simple JSON store (avoids ESM issues with electron-store v8+)
@@ -219,7 +269,7 @@ function createWindow() {
     if (url.startsWith(KERN_URL)) {
       return { action: 'allow' };
     }
-    shell.openExternal(url);
+    openExternalUrl(url);
     return { action: 'deny' };
   });
 
@@ -227,7 +277,7 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(KERN_URL)) {
       event.preventDefault();
-      shell.openExternal(url);
+      openExternalUrl(url);
     }
   });
 
