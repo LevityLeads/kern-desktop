@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, shell, nativeImage } = require('electron
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 
 const KERN_URL = 'https://kern-interface.vercel.app';
@@ -94,6 +95,52 @@ let mainWindow = null;
 let tray = null;
 
 // ------------------------------------------------------------------
+// Platform-specific window material config.
+//
+// Windows: DO NOT use `transparent: true`. It silently breaks
+// `-webkit-app-region: drag` (Electron #32502, closed wontfix) and
+// fights `backgroundMaterial` acrylic (#39959). You get a window you
+// can resize but not drag. The correct way to get Win11 acrylic is
+// `transparent: false` + `backgroundColor: '#00000000'` +
+// `backgroundMaterial: 'acrylic'`, which keeps drag regions working.
+// Acrylic is only safe on Windows 11 (build >= 22000); on Win10 it
+// artifacts (white->black), so fall back to a solid background there.
+//
+// macOS: vibrancy DOES need `transparent: true`, so keep it there.
+// ------------------------------------------------------------------
+function getMaterialOptions() {
+  if (process.platform === 'darwin') {
+    return {
+      transparent: true,
+      backgroundColor: '#00000000',
+      vibrancy: 'under-window',
+    };
+  }
+
+  if (process.platform === 'win32') {
+    const build = parseInt((os.release() || '').split('.')[2], 10) || 0;
+    const isWin11 = build >= 22000;
+    return isWin11
+      ? {
+          transparent: false,
+          backgroundColor: '#00000000',
+          backgroundMaterial: 'acrylic',
+        }
+      : {
+          // Win10: acrylic is broken, use an opaque dark background.
+          transparent: false,
+          backgroundColor: '#0a0614',
+        };
+  }
+
+  // Linux / other
+  return {
+    transparent: false,
+    backgroundColor: '#0a0614',
+  };
+}
+
+// ------------------------------------------------------------------
 // Single instance lock
 // ------------------------------------------------------------------
 const gotLock = app.requestSingleInstanceLock();
@@ -131,11 +178,10 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
 
-    // Transparency & material
-    transparent: true,
-    backgroundColor: '#00000000',
-    backgroundMaterial: 'acrylic',     // Windows 11 Mica/Acrylic
-    vibrancy: 'under-window',          // macOS
+    // Transparency & material (platform-split, see getMaterialOptions).
+    // On Windows this deliberately avoids `transparent: true` so window
+    // dragging via -webkit-app-region works.
+    ...getMaterialOptions(),
 
     // Frameless with native window controls overlay
     frame: false,
