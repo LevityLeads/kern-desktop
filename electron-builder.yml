@@ -50,3 +50,8 @@ publish:
   provider: github
   owner: levityleads
   repo: kern-desktop
+  # electron-builder defaults to `draft`, which publishes a release that
+  # is invisible to anonymous readers and therefore invisible to
+  # electron-updater. v1.0.3 landed as a draft and had to be published
+  # by hand. Ship straight to a real release instead.
+  releaseType: release
