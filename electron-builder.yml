@@ -9,6 +9,8 @@ directories:
 files:
   - main.js
   - preload.js
+  - setup.html
+  - setup-preload.js
   - package.json
   - node_modules/**/*
 

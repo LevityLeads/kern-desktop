@@ -1,11 +1,63 @@
-const { app, BrowserWindow, Tray, Menu, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const KERN_URL = 'https://kern-interface.vercel.app';
+// ------------------------------------------------------------------
+// Kern host resolution.
+//
+// The host is DELIBERATELY not hardcoded. This repo is public so that
+// electron-updater can read releases anonymously, and the Kern server
+// returns a flat 404 to any request arriving on a non-canonical
+// hostname specifically so that hostname is not discoverable. Baking
+// it into source here would hand back exactly what that protects.
+//
+// Resolution order:
+//   1. KERN_URL environment variable (dev / power use)
+//   2. `kernUrl` persisted in settings.json under userData
+//   3. nothing, in which case the first-run setup window asks for it
+//
+// v1.0.2 and earlier hardcoded https://kern-interface.vercel.app,
+// which now 404s. Any such value found in settings is discarded.
+// ------------------------------------------------------------------
+const DEAD_HOSTS = new Set(['kern-interface.vercel.app']);
+
+/**
+ * Coerce user input into a bare origin (scheme + host + optional port).
+ * Accepts "example.com", "example.com/", "https://example.com/foo".
+ * Returns null if it cannot be made into a sane https origin.
+ */
+function normaliseKernUrl(input) {
+  if (!input || typeof input !== 'string') return null;
+  let raw = input.trim();
+  if (!raw) return null;
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (!host || !host.includes('.')) {
+    // Allow bare loopback for local development, reject everything else.
+    const isLoopback = host === 'localhost' || host === '127.0.0.1';
+    if (!isLoopback) return null;
+  }
+  if (DEAD_HOSTS.has(host)) return null;
+
+  const isLoopback = host === 'localhost' || host === '127.0.0.1';
+  if (parsed.protocol !== 'https:' && !isLoopback) return null;
+
+  return parsed.port ? `${parsed.protocol}//${host}:${parsed.port}` : `${parsed.protocol}//${host}`;
+}
+
+/** Current Kern origin, or null when the app is not configured yet. */
+let kernUrl = null;
 
 // ------------------------------------------------------------------
 // Open external links in Google Chrome, not the OS default browser.
@@ -89,10 +141,27 @@ class JsonStore {
 const store = new JsonStore({
   windowBounds: { x: undefined, y: undefined, width: 1200, height: 800 },
   windowMaximized: false,
+  kernUrl: null,
 });
 
 let mainWindow = null;
+let setupWindow = null;
 let tray = null;
+
+/**
+ * Resolve the Kern origin from env, then persisted settings.
+ * Silently drops a persisted value that is no longer usable (e.g. the
+ * old hardcoded vercel.app host carried over from v1.0.2).
+ */
+function resolveKernUrl() {
+  const fromEnv = normaliseKernUrl(process.env.KERN_URL);
+  if (fromEnv) return fromEnv;
+
+  const stored = store.get('kernUrl');
+  const fromStore = normaliseKernUrl(stored);
+  if (stored && !fromStore) store.set('kernUrl', null);
+  return fromStore;
+}
 
 // ------------------------------------------------------------------
 // Platform-specific window material config.
@@ -149,19 +218,111 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
+    const target = mainWindow || setupWindow;
+    if (target) {
+      if (target.isMinimized()) target.restore();
+      target.show();
+      target.focus();
     }
   });
 
   app.whenReady().then(() => {
-    createWindow();
+    kernUrl = resolveKernUrl();
+    if (kernUrl) {
+      createWindow();
+    } else {
+      createSetupWindow();
+    }
     createTray();
     setupAutoUpdater();
   });
 }
+
+// ------------------------------------------------------------------
+// First-run / reconfiguration setup window.
+//
+// Asks for the Kern host, validates it, persists it to settings.json,
+// then swaps to the real app window. Also used to recover when the
+// configured host stops answering.
+// ------------------------------------------------------------------
+function createSetupWindow(errorMessage) {
+  if (setupWindow) {
+    setupWindow.show();
+    setupWindow.focus();
+    return;
+  }
+
+  setupWindow = new BrowserWindow({
+    width: 560,
+    height: 420,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: '#0a0614',
+    title: 'Kern setup',
+    show: false,
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'setup-preload.js'),
+    },
+  });
+
+  setupWindow.setMenuBarVisibility(false);
+
+  const query = {};
+  const existing = store.get('kernUrl');
+  if (existing) query.current = existing;
+  if (errorMessage) query.error = errorMessage;
+
+  setupWindow.loadFile(path.join(__dirname, 'setup.html'), { query });
+
+  setupWindow.once('ready-to-show', () => setupWindow.show());
+
+  setupWindow.on('closed', () => {
+    setupWindow = null;
+    // Closing setup without ever configuring anything leaves nothing to
+    // show, so quit rather than sit invisibly in the tray.
+    if (!kernUrl && !mainWindow) {
+      app.isQuitting = true;
+      app.quit();
+    }
+  });
+}
+
+ipcMain.handle('kern-setup:save', (_event, rawValue) => {
+  const normalised = normaliseKernUrl(rawValue);
+
+  if (!normalised) {
+    return { ok: false, error: 'That does not look like a valid https address.' };
+  }
+
+  store.set('kernUrl', normalised);
+  kernUrl = normalised;
+
+  if (setupWindow) {
+    const win = setupWindow;
+    setupWindow = null;
+    win.close();
+  }
+
+  if (mainWindow) {
+    mainWindow.loadURL(kernUrl);
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    createWindow();
+  }
+
+  return { ok: true, url: normalised };
+});
+
+ipcMain.handle('kern-setup:cancel', () => {
+  if (setupWindow) setupWindow.close();
+  return { ok: true };
+});
 
 // ------------------------------------------------------------------
 // Window creation
@@ -214,7 +375,30 @@ function createWindow() {
     mainWindow.show();
   });
 
-  mainWindow.loadURL(KERN_URL);
+  mainWindow.loadURL(kernUrl);
+
+  // ------------------------------------
+  // Dead-host recovery.
+  //
+  // A wrong or stale host does not fail to load, it loads a 404 page,
+  // which is how v1.0.2 silently became a window saying "Not Found".
+  // Treat a 4xx/5xx on the top-level frame as a configuration problem
+  // and reopen setup instead of leaving a dead window on screen.
+  // ------------------------------------
+  mainWindow.webContents.on('did-navigate', (_event, url, httpResponseCode) => {
+    if (!kernUrl || !url.startsWith(kernUrl)) return;
+    if (httpResponseCode && httpResponseCode >= 400) {
+      createSetupWindow(
+        `${kernUrl} answered ${httpResponseCode}. Check the address, or update it if the host has moved.`
+      );
+    }
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // -3 is ERR_ABORTED, which fires on ordinary redirects and cancels.
+    if (!isMainFrame || errorCode === -3) return;
+    createSetupWindow(`Could not reach ${kernUrl} (${errorDescription}).`);
+  });
 
   // ------------------------------------
   // Inject CSS to make body translucent so Mica bleeds through
@@ -312,7 +496,7 @@ function createWindow() {
   // Open external links in the default browser
   // ------------------------------------
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(KERN_URL)) {
+    if (kernUrl && url.startsWith(kernUrl)) {
       return { action: 'allow' };
     }
     openExternalUrl(url);
@@ -321,7 +505,7 @@ function createWindow() {
 
   // Catch in-page navigations to external domains
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(KERN_URL)) {
+    if (!kernUrl || !url.startsWith(kernUrl)) {
       event.preventDefault();
       openExternalUrl(url);
     }
@@ -369,6 +553,10 @@ function createTray() {
           mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
         }
       },
+    },
+    {
+      label: 'Change Kern address...',
+      click: () => createSetupWindow(),
     },
     { type: 'separator' },
     {
@@ -431,7 +619,11 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   // macOS dock click
   if (mainWindow === null) {
-    createWindow();
+    if (kernUrl) {
+      createWindow();
+    } else {
+      createSetupWindow();
+    }
   } else {
     mainWindow.show();
   }

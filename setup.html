@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';"
+    />
+    <title>Kern setup</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 32px 34px;
+        background: #0a0614;
+        color: #efeaf7;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        user-select: none;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 19px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      p.sub {
+        margin: 0 0 22px;
+        color: #9d92b4;
+        font-size: 13px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #9d92b4;
+      }
+
+      input {
+        width: 100%;
+        padding: 11px 13px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.04);
+        color: #efeaf7;
+        font-size: 14px;
+        font-family: inherit;
+        user-select: text;
+        outline: none;
+        transition: border-color 0.15s ease, background 0.15s ease;
+      }
+
+      input:focus {
+        border-color: #7c5cff;
+        background: rgba(124, 92, 255, 0.08);
+      }
+
+      .error {
+        margin: 0 0 18px;
+        padding: 11px 13px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 106, 106, 0.28);
+        background: rgba(255, 106, 106, 0.1);
+        color: #ffb3b3;
+        font-size: 13px;
+      }
+
+      .hint {
+        margin: 9px 0 0;
+        color: #6f6688;
+        font-size: 12px;
+        min-height: 17px;
+      }
+
+      .hint.bad {
+        color: #ff8f8f;
+      }
+
+      .actions {
+        margin-top: 26px;
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+
+      button {
+        padding: 10px 20px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        font-size: 14px;
+        font-family: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        transition: filter 0.15s ease, background 0.15s ease;
+      }
+
+      button.primary {
+        background: #7c5cff;
+        color: #fff;
+      }
+
+      button.primary:hover {
+        filter: brightness(1.12);
+      }
+
+      button.primary:disabled {
+        opacity: 0.45;
+        cursor: default;
+        filter: none;
+      }
+
+      button.ghost {
+        background: transparent;
+        border-color: rgba(255, 255, 255, 0.14);
+        color: #b9b0cc;
+      }
+
+      button.ghost:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Where does Kern live?</h1>
+    <p class="sub">
+      The address is stored locally on this machine and is not part of the app.
+      You only need to do this once.
+    </p>
+
+    <div id="error" class="error" hidden></div>
+
+    <label for="host">Kern address</label>
+    <input
+      id="host"
+      type="text"
+      placeholder="kern.example.com"
+      spellcheck="false"
+      autocomplete="off"
+      autocapitalize="off"
+    />
+    <p class="hint" id="hint"></p>
+
+    <div class="actions">
+      <button class="ghost" id="cancel" type="button">Cancel</button>
+      <button class="primary" id="save" type="button">Save and open</button>
+    </div>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const input = document.getElementById("host");
+      const hint = document.getElementById("hint");
+      const saveBtn = document.getElementById("save");
+      const cancelBtn = document.getElementById("cancel");
+      const errorBox = document.getElementById("error");
+
+      const incomingError = params.get("error");
+      if (incomingError) {
+        errorBox.textContent = incomingError;
+        errorBox.hidden = false;
+      }
+
+      const current = params.get("current");
+      if (current) input.value = current;
+
+      function setHint(message, isBad) {
+        hint.textContent = message || "";
+        hint.classList.toggle("bad", Boolean(isBad));
+      }
+
+      function preview() {
+        const raw = input.value.trim();
+        if (!raw) {
+          setHint("");
+          saveBtn.disabled = true;
+          return;
+        }
+        saveBtn.disabled = false;
+        setHint(
+          /^https?:\/\//i.test(raw) ? "Will open " + raw : "Will open https://" + raw
+        );
+      }
+
+      input.addEventListener("input", preview);
+
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") save();
+      });
+
+      async function save() {
+        const value = input.value.trim();
+        if (!value) return;
+
+        saveBtn.disabled = true;
+        setHint("Saving...");
+
+        const result = await window.kernSetup.save(value);
+
+        if (!result || !result.ok) {
+          saveBtn.disabled = false;
+          setHint((result && result.error) || "Could not save that address.", true);
+        }
+        // On success the main process closes this window.
+      }
+
+      saveBtn.addEventListener("click", save);
+      cancelBtn.addEventListener("click", () => window.kernSetup.cancel());
+
+      input.focus();
+      preview();
+    </script>
+  </body>
+</html>
