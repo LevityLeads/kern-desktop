@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; media-src file:; img-src 'self' data:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kern recorder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Local Windows capture</p>
+          <h1>Recorder</h1>
+        </div>
+        <span id="state" class="state idle">Idle</span>
+      </header>
+
+      <section id="alert" class="alert" hidden></section>
+
+      <section class="panel controls">
+        <div class="timer" id="timer">00:00:00</div>
+        <p id="status-copy">Ready. Kern mute is separate from Teams mute.</p>
+        <div class="button-row">
+          <button id="start" class="primary" type="button">Start recording</button>
+          <button id="pause" type="button" disabled>Pause</button>
+          <button id="mute" type="button" disabled>Mute Kern mic</button>
+          <button id="stop" class="danger" type="button" disabled>Stop</button>
+        </div>
+      </section>
+
+      <section class="panel setup">
+        <label for="microphone">Microphone</label>
+        <div class="device-row">
+          <select id="microphone" disabled>
+            <option value="default">Default microphone, pinned when recording starts</option>
+          </select>
+          <button id="refresh-devices" type="button">Refresh</button>
+        </div>
+        <p class="hint" id="device-hint">Every active playback endpoint is captured separately.</p>
+        <label class="consent">
+          <input id="consent" type="checkbox" />
+          I have permission to record this conversation where required.
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Live tracks</h2>
+          <span id="disk">Disk space unknown</span>
+        </div>
+        <div id="tracks" class="tracks empty">No active tracks.</div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Saved locally</h2>
+          <button id="refresh-sessions" type="button">Refresh</button>
+        </div>
+        <div id="sessions" class="sessions empty">No recordings yet.</div>
+      </section>
+    </main>
+
+    <template id="track-template">
+      <article class="track">
+        <div class="track-copy">
+          <strong class="track-name"></strong>
+          <span class="track-health"></span>
+        </div>
+        <meter class="track-meter" min="0" max="1" value="0"></meter>
+        <span class="track-detail"></span>
+      </article>
+    </template>
+
+    <template id="session-template">
+      <article class="session">
+        <div class="session-copy">
+          <strong class="session-name"></strong>
+          <span class="session-detail"></span>
+        </div>
+        <div class="session-actions">
+          <button data-action="play" type="button">Play</button>
+          <button data-action="export" type="button">Export</button>
+          <button data-action="folder" type="button">Folder</button>
+          <button data-action="recover" type="button" hidden>Recover</button>
+        </div>
+        <div class="players"></div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>

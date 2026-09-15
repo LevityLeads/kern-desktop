@@ -11,10 +11,17 @@ files:
   - preload.js
   - setup.html
   - setup-preload.js
+  - recorder/**/*
+  - recorder-ui/**/*
   - package.json
   - node_modules/**/*
 
 win:
+  extraResources:
+    - from: native/Kern.Recorder.Helper/publish/win-x64
+      to: recorder-helper
+      filter:
+        - Kern.Recorder.Helper.exe
   target:
     - target: nsis
       arch:
