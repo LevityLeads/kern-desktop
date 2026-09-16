@@ -84,6 +84,51 @@ test('idle helper is killed if graceful shutdown does not exit', async () => {
   assert.equal(supervisor.child, null);
 });
 
+test('accepted heartbeats keep recording and use the native empty-payload contract', async () => {
+  let now = 1000;
+  let pingCount = 0;
+  const { supervisor, transport, child } = activeSupervisor((command, payload) => {
+    assert.equal(command, 'ping');
+    if (Object.keys(payload).length !== 0) {
+      throw Object.assign(new Error('Unknown payload property'), { code: 'invalid-payload' });
+    }
+    pingCount += 1;
+    return { protocolVersion: 1 };
+  });
+  supervisor.now = () => now;
+  supervisor.lastHeartbeatAt = now;
+
+  for (let count = 1; count <= 5; count += 1) {
+    now += 1000;
+    await supervisor._heartbeat();
+    assert.equal(supervisor.snapshot().state, 'recording');
+    assert.equal(pingCount, count);
+    assert.equal(supervisor.lastHeartbeatAt, now);
+    assert.equal(supervisor.heartbeatInFlight, false);
+    assert.equal(supervisor.transport, transport);
+    assert.equal(supervisor.child, child);
+    assert.equal(transport.closed, false);
+    assert.equal(child.exitCode, null);
+  }
+});
+
+test('rejected heartbeat still interrupts recording and terminates the helper', async () => {
+  const error = Object.assign(new Error('helper did not respond'), { code: 'helper-timeout' });
+  const { supervisor, transport, child } = activeSupervisor(() => Promise.reject(error));
+  supervisor.now = () => 1000;
+  supervisor.lastHeartbeatAt = 1000;
+
+  await supervisor._heartbeat();
+
+  assert.equal(supervisor.snapshot().state, 'interrupted');
+  assert.equal(supervisor.snapshot().failure.code, 'helper-timeout');
+  assert.equal(supervisor.heartbeatInFlight, false);
+  assert.equal(transport.closed, true);
+  assert.equal(child.exitCode, 1);
+  assert.equal(supervisor.transport, null);
+  assert.equal(supervisor.child, null);
+});
+
 test('non-Windows capture fails explicitly', async () => {
   const supervisor = new RecorderSupervisor({
     recordingsRoot: '/tmp/recordings',

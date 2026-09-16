@@ -358,7 +358,7 @@ class RecorderSupervisor extends EventEmitter {
     }
     this.heartbeatInFlight = true;
     try {
-      await this.transport.request('ping', { parentPid: process.pid }, 900);
+      await this.transport.request('ping', {}, 900);
       this.lastHeartbeatAt = this.now();
     } catch (error) {
       await this._handleHelperFailure(error);
