@@ -19,7 +19,9 @@ test('safePath rejects traversal, backslashes and reserved names', async () => {
   try {
     fs.mkdirSync(path.join(root, 'segments'), { recursive: true });
     fs.writeFileSync(path.join(root, 'segments', 'a.wav'), 'x');
-    assert.equal(await safePath(root, 'segments/a.wav'), fs.realpathSync(path.join(root, 'segments', 'a.wav')));
+    // Normalise both sides: Windows realpath may return 8.3 short or long forms.
+    const resolved = await safePath(root, 'segments/a.wav');
+    assert.equal(fs.realpathSync(resolved), fs.realpathSync(path.join(root, 'segments', 'a.wav')));
     for (const bad of ['../escape', 'segments\\a.wav', 'segments/../../x', 'seg:ments', 'con.wav']) {
       await assert.rejects(safePath(root, bad), e => e instanceof CallError);
     }
