@@ -2,6 +2,9 @@ name: Windows capture spike
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-call-capture
   pull_request:
     paths:
       - 'main.js'
