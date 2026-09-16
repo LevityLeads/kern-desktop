@@ -319,6 +319,13 @@ internal sealed class CaptureTrack : IDisposable
                     health = peak > 0.0001 ? "capturing-signal" : "acquired-silence";
                     message = null;
                 }
+                // Digital silence is never written to disk. peak == 0 means every sample
+                // is exactly zero (a silent loopback endpoint or a muted source); the gap
+                // is reconstructed as silence at render time from segment timestamps. This
+                // is what stops idle playback devices writing gigabytes of blank audio.
+                // A live microphone's noise floor and any playing audio are never exactly
+                // zero, so real speech is always captured.
+                if (peak == 0) return;
                 copy = buffer[..alignedBytes].ToArray();
                 packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch);
             }
