@@ -85,8 +85,14 @@ test('export copies only catalogued finalised segments', (context) => {
   assert.deepEqual(fs.readdirSync(exported).sort(), [
     'journal.ndjson',
     'manifest.json',
-    'microphone-abc-000000.wav',
+    'segments',
   ]);
+  const exportedManifest = JSON.parse(fs.readFileSync(path.join(exported, 'manifest.json'), 'utf8'));
+  for (const segment of exportedManifest.segments) {
+    const bytes = fs.readFileSync(path.join(exported, segment.relativePath));
+    assert.equal(bytes.length, segment.byteLength);
+    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), segment.sha256);
+  }
 });
 
 test('journal reader ignores only an incomplete final record', (context) => {
@@ -123,6 +129,19 @@ test('playback and export reject a segment changed after manifest publication', 
   };
   assert.throws(() => resolveSegment(data.root, payload), /byte length/);
   assert.throws(() => exportSession(data.root, data.sessionId, destination), /byte length/);
+});
+
+test('linked segment files cannot escape the recording directory', (context) => {
+  const data = fixture();
+  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
+  const target = path.join(data.root, 'outside.wav');
+  fs.copyFileSync(data.segmentPath, target);
+  fs.unlinkSync(data.segmentPath);
+  try { fs.symlinkSync(target, data.segmentPath); }
+  catch (error) { if (error.code === 'EPERM') return context.skip('Symlink privilege unavailable'); throw error; }
+  assert.throws(() => resolveSegment(data.root, {
+    sessionId: data.sessionId, trackId: 'microphone-abc', segmentId: 'segment',
+  }), /symlink/);
 });
 
 test('manifest path traversal is rejected even if manifest is tampered', (context) => {

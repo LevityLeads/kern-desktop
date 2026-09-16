@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { assertSafeId, assertSessionId } = require('./protocol');
+const { assertSessionId } = require('./protocol');
 
 const MANIFEST_NAME = 'manifest.json';
 const JOURNAL_NAME = 'journal.ndjson';
@@ -32,7 +32,8 @@ function manifestPath(root, sessionId) {
 }
 
 function readManifest(root, sessionId) {
-  const manifest = readJson(manifestPath(root, sessionId));
+  const file = assertUnlinkedPath(root, manifestPath(root, sessionId));
+  const manifest = readJson(file);
   if (manifest.sessionId !== sessionId || manifest.protocolVersion !== 1) {
     throw new Error('Recording manifest identity or protocol does not match');
   }
@@ -114,8 +115,23 @@ function findSegment(manifest, trackId, segmentId) {
   return segment;
 }
 
+function assertUnlinkedPath(root, candidate) {
+  const target = ensureInside(root, candidate);
+  let current = path.resolve(root);
+  const parts = path.relative(current, target).split(path.sep).filter(Boolean);
+  for (const part of [null, ...parts]) {
+    if (part !== null) current = path.join(current, part);
+    if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Recording path contains a symlink');
+    ensureInside(fs.realpathSync(root), fs.realpathSync(current));
+  }
+  return target;
+}
+
 function resolveFinalisedSegmentFile(sessionRoot, segment) {
-  const filePath = ensureInside(sessionRoot, path.join(sessionRoot, segment.relativePath));
+  if (typeof segment.relativePath !== 'string' || path.isAbsolute(segment.relativePath)) {
+    throw new Error('Invalid recording relative path');
+  }
+  const filePath = assertUnlinkedPath(sessionRoot, path.join(sessionRoot, segment.relativePath));
   const stat = fs.statSync(filePath);
   if (!stat.isFile()) throw new Error('Recording segment is not a file');
   if (!Number.isSafeInteger(segment.byteLength) || segment.byteLength <= 0 || stat.size !== segment.byteLength) {
@@ -164,13 +180,17 @@ function exportSession(root, sessionId, destinationRoot) {
   for (const segment of manifest.segments || []) {
     if (segment.status !== 'finalised') continue;
     const source = resolveFinalisedSegmentFile(sourceRoot, segment);
-    const name = `${assertSafeId(segment.trackId, 'trackId')}-${String(segment.sequence).padStart(6, '0')}.wav`;
-    copyFileExclusive(source, path.join(target, name));
+    const destination = ensureInside(target, path.join(target, segment.relativePath));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    copyFileExclusive(source, destination);
   }
   copyFileExclusive(manifestPath(root, sessionId), path.join(target, MANIFEST_NAME));
 
   const journalSource = path.join(sourceRoot, JOURNAL_NAME);
-  if (fs.existsSync(journalSource)) copyFileExclusive(journalSource, path.join(target, JOURNAL_NAME));
+  if (fs.existsSync(journalSource)) {
+    assertUnlinkedPath(sourceRoot, journalSource);
+    copyFileExclusive(journalSource, path.join(target, JOURNAL_NAME));
+  }
   return target;
 }
 
