@@ -82,10 +82,10 @@ internal sealed class SegmentManifest
     public required long SampleCount { get; init; }
     public required long ByteLength { get; init; }
     public required string Sha256 { get; init; }
-    public required long? FirstDevicePosition { get; init; }
-    public required long? FirstQpcPosition { get; init; }
-    public required long? LastDevicePosition { get; init; }
-    public required long? LastQpcPosition { get; init; }
+    public long? FirstDevicePosition { get; init; }
+    public long? FirstQpcPosition { get; init; }
+    public long? LastDevicePosition { get; init; }
+    public long? LastQpcPosition { get; init; }
     public required string PublishedAtUtc { get; init; }
 }
 
@@ -107,6 +107,7 @@ internal sealed class SessionManifest
     public required string StartedAtUtc { get; init; }
     public string? EndedAtUtc { get; set; }
     public long TimelineFrequency { get; init; }
+    public long? TimelineOriginTicks { get; init; }
     public long DurationMs { get; set; }
     public long SizeBytes { get; set; }
     public long CaptureGeneration { get; set; } = 1;
