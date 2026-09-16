@@ -41,7 +41,7 @@ internal static class PeakMeter
     {
         var peak = 0d;
         for (var index = 0; index + 2 <= buffer.Length; index += 2)
-            peak = Math.Max(peak, Math.Abs(System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(buffer[index..])) / 32768d);
+            peak = Math.Max(peak, Math.Abs(System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(buffer[index..]) / 32768d));
         return peak;
     }
 
