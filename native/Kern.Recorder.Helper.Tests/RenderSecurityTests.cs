@@ -21,6 +21,13 @@ public sealed class RenderSecurityTests
         Assert.Throws<InvalidDataException>(() => CallRenderer.Render(fixture.Root));
     }
 
+    private static bool TryLink(Action create)
+    {
+        // Windows CI without Developer Mode denies symlink creation; treat as skip.
+        try { create(); return true; }
+        catch (Exception e) when (e is UnauthorizedAccessException or IOException) { return false; }
+    }
+
     [Fact]
     public void RejectsLinkedSourceAndDerivedDirectory()
     {
@@ -29,12 +36,12 @@ public sealed class RenderSecurityTests
         var target = Path.Combine(fixture.Root, source.RelativePath);
         var held = target + ".original";
         File.Move(target, held);
-        File.CreateSymbolicLink(target, held);
+        if (!TryLink(() => File.CreateSymbolicLink(target, held))) { File.Move(held, target); return; }
         Assert.Throws<InvalidDataException>(() => CallRenderer.Render(fixture.Root));
         File.Delete(target); File.Move(held, target);
         var other = Path.Combine(fixture.Root, "other");
         Directory.CreateDirectory(other);
-        Directory.CreateSymbolicLink(Path.Combine(fixture.Root, "derived"), other);
+        if (!TryLink(() => Directory.CreateSymbolicLink(Path.Combine(fixture.Root, "derived"), other))) return;
         Assert.Throws<InvalidDataException>(() => CallRenderer.Render(fixture.Root));
         Assert.Empty(Directory.GetFiles(other));
     }
@@ -45,9 +52,9 @@ public sealed class RenderSecurityTests
         using var fixture = new RenderFixture();
         fixture.Add(0.2f); fixture.Save();
         var alias = fixture.Root + "-alias";
+        if (!TryLink(() => Directory.CreateSymbolicLink(alias, fixture.Root))) return;
         try
         {
-            Directory.CreateSymbolicLink(alias, fixture.Root);
             Assert.Throws<InvalidDataException>(() => CallRenderer.Render(alias));
         }
         finally { Directory.Delete(alias); }
