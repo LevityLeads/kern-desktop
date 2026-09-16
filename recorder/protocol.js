@@ -2,6 +2,15 @@
 
 const IPC = Object.freeze({
   STATUS: 'kern-recorder:status',
+  GET_STATUS: 'kern-recorder:get-status',
+  GET_CALL: 'kern-recorder:get-call',
+  PREPARE_CALL: 'kern-recorder:prepare-call',
+  TRANSCRIBE: 'kern-recorder:transcribe',
+  EXPORT_TRANSCRIPT: 'kern-recorder:export-transcript',
+  COPY_TRANSCRIPT: 'kern-recorder:copy-transcript',
+  GET_TRANSCRIPTION_ENABLED: 'kern-recorder:get-transcription-enabled',
+  SET_TRANSCRIPTION_ENABLED: 'kern-recorder:set-transcription-enabled',
+  SIGN_IN: 'kern-recorder:sign-in',
   LIST_DEVICES: 'kern-recorder:list-devices',
   LIST_SESSIONS: 'kern-recorder:list-sessions',
   GET_SESSION: 'kern-recorder:get-session',
@@ -138,6 +147,17 @@ function validateRendererPayload(channel, payload) {
       return validateStartPayload(payload);
     case IPC.SET_MIC_MUTED:
       return validateMicMutePayload(payload);
+    case IPC.SET_TRANSCRIPTION_ENABLED: {
+      const value = assertPlainObject(payload);
+      assertOnlyKeys(value, ['enabled']);
+      if (typeof value.enabled !== 'boolean') throw new TypeError('enabled must be boolean');
+      return { enabled: value.enabled };
+    }
+    case IPC.GET_CALL:
+    case IPC.PREPARE_CALL:
+    case IPC.TRANSCRIBE:
+    case IPC.EXPORT_TRANSCRIPT:
+    case IPC.COPY_TRANSCRIPT:
     case IPC.GET_SESSION:
     case IPC.RECOVER:
     case IPC.EXPORT:
@@ -145,6 +165,9 @@ function validateRendererPayload(channel, payload) {
       return validateSessionPayload(payload);
     case IPC.GET_PLAYBACK_URL:
       return validatePlaybackPayload(payload);
+    case IPC.GET_STATUS:
+    case IPC.GET_TRANSCRIPTION_ENABLED:
+    case IPC.SIGN_IN:
     case IPC.LIST_DEVICES:
     case IPC.LIST_SESSIONS:
     case IPC.PAUSE:

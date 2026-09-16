@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
 const { dialog, shell } = require('electron');
 const { registerRecorderIpc } = require('./ipc');
 const catalog = require('./session-catalog');
@@ -20,6 +21,7 @@ class RecorderController {
       ipcMain,
       getRecorderWindow: () => this.window,
       supervisor,
+      trustedRecorderUrl: pathToFileURL(path.join(appRoot, 'recorder-ui', 'index.html')).href,
       handlers: {
         listSessions: () => catalog.listSessions(recordingsRoot),
         getSession: (sessionId) => catalog.readManifest(recordingsRoot, sessionId),
