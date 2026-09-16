@@ -47,7 +47,15 @@ internal sealed partial class RenderPaths : IDisposable
         if (OperatingSystem.IsWindows())
         {
             var handle = OpenDirectory(path, 0x80000000, 1, 0, 3, 0x00200000, 0);
-            if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(Marshal.GetLastWin32Error()); }
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                // Translate a missing file to the managed IOException family so callers
+                // that treat "not found" as a cache miss behave the same as on POSIX.
+                if (error is 2 or 3) throw new FileNotFoundException("Render input was not found.", path);
+                throw new Win32Exception(error);
+            }
             try
             {
                 if (!GetFileInformationByHandle(handle, out var info)) throw new Win32Exception(Marshal.GetLastWin32Error());
