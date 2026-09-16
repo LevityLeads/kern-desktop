@@ -6,6 +6,8 @@ const { PROTOCOL_VERSION, isPlainObject } = require('./protocol');
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 1000;
+const STARTUP_RETRY_DELAY_MS = 50;
+const TRANSIENT_STARTUP_ERRORS = new Set(['ENOENT', 'ECONNREFUSED', 'EBUSY']);
 
 function pipePath(pipeName, platform = process.platform) {
   return platform === 'win32' ? `\\\\.\\pipe\\${pipeName}` : pathForUnixTests(pipeName);
@@ -70,10 +72,46 @@ class HelperTransport extends EventEmitter {
   async connect(timeoutMs = 5000) {
     if (this.socket) throw new Error('Helper transport is already connected');
 
-    await new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let lastError = null;
+    while (!this.socket) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        const error = new Error('Timed out connecting to capture helper');
+        if (lastError?.code) error.code = lastError.code;
+        throw error;
+      }
+
+      try {
+        this.socket = await this._connectOnce(remainingMs);
+      } catch (error) {
+        if (!TRANSIENT_STARTUP_ERRORS.has(error?.code)) throw error;
+        lastError = error;
+        const retryDelayMs = Math.min(STARTUP_RETRY_DELAY_MS, deadline - Date.now());
+        if (retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
+    }
+    this._bindSocket(this.socket);
+
+    const hello = await this.request('hello', { protocolVersion: PROTOCOL_VERSION }, 2000);
+    if (hello.protocolVersion !== PROTOCOL_VERSION) {
+      this.close();
+      throw new Error(`Capture helper protocol ${hello.protocolVersion} is incompatible`);
+    }
+    return hello;
+  }
+
+  _connectOnce(timeoutMs) {
+    return new Promise((resolve, reject) => {
       let settled = false;
       const socket = this.socketFactory(pipePath(this.pipeName));
-      const timer = setTimeout(() => finish(new Error('Timed out connecting to capture helper')), timeoutMs);
+      const timer = setTimeout(() => {
+        const error = new Error('Timed out connecting to capture helper');
+        error.code = 'ETIMEDOUT';
+        finish(error);
+      }, timeoutMs);
 
       const finish = (error) => {
         if (settled) return;
@@ -85,9 +123,7 @@ class HelperTransport extends EventEmitter {
           socket.destroy();
           reject(error);
         } else {
-          this.socket = socket;
-          this._bindSocket(socket);
-          resolve();
+          resolve(socket);
         }
       };
       const onConnect = () => finish();
@@ -95,13 +131,6 @@ class HelperTransport extends EventEmitter {
       socket.once('connect', onConnect);
       socket.once('error', onInitialError);
     });
-
-    const hello = await this.request('hello', { protocolVersion: PROTOCOL_VERSION }, 2000);
-    if (hello.protocolVersion !== PROTOCOL_VERSION) {
-      this.close();
-      throw new Error(`Capture helper protocol ${hello.protocolVersion} is incompatible`);
-    }
-    return hello;
   }
 
   _bindSocket(socket) {
