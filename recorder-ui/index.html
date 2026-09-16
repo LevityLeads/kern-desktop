@@ -2,10 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self'; script-src 'self'; media-src file:; img-src 'self' data:;"
-    />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; media-src file:; img-src 'self' data:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kern recorder</title>
     <link rel="stylesheet" href="styles.css" />
@@ -13,26 +11,20 @@
   <body>
     <main>
       <header>
-        <div>
-          <p class="eyebrow">Local Windows capture</p>
-          <h1>Recorder</h1>
-        </div>
-        <span id="state" class="state idle">Idle</span>
+        <div><p class="eyebrow">Local Windows capture</p><h1>Recorder</h1></div>
+        <span id="state" class="state idle" role="status">Idle</span>
       </header>
-
-      <section id="alert" class="alert" hidden></section>
-
+      <section id="alert" class="alert" role="alert" hidden></section>
       <section class="panel controls">
         <div class="timer" id="timer">00:00:00</div>
         <p id="status-copy">Ready. Kern mute is separate from Teams mute.</p>
         <div class="button-row">
-          <button id="start" class="primary" type="button">Start recording</button>
+          <button id="start" class="primary" type="button" disabled>Start recording</button>
           <button id="pause" type="button" disabled>Pause</button>
           <button id="mute" type="button" disabled>Mute Kern mic</button>
           <button id="stop" class="danger" type="button" disabled>Stop</button>
         </div>
       </section>
-
       <section class="panel setup">
         <label for="microphone">Microphone</label>
         <div class="device-row">
@@ -41,57 +33,69 @@
           </select>
           <button id="refresh-devices" type="button">Refresh</button>
         </div>
-        <p class="hint" id="device-hint">Every active playback endpoint is captured separately.</p>
         <label class="consent">
           <input id="consent" type="checkbox" />
           I have permission to record this conversation where required.
         </label>
+        <label class="consent">
+          <input id="auto-transcribe" type="checkbox" disabled aria-describedby="auto-transcribe-disclosure" />
+          Automatically transcribe new recordings only
+        </label>
+        <p class="hint" id="auto-transcribe-disclosure">Sends audio to private Kern storage and Groq after recording. Existing recordings are never uploaded automatically. Turning this off does not cancel a job already requested.</p>
       </section>
-
       <section class="panel">
-        <div class="section-heading">
-          <h2>Live tracks</h2>
-          <span id="disk">Disk space unknown</span>
-        </div>
-        <div id="tracks" class="tracks empty">No active tracks.</div>
-      </section>
-
-      <section class="panel">
-        <div class="section-heading">
-          <h2>Saved locally</h2>
-          <button id="refresh-sessions" type="button">Refresh</button>
-        </div>
+        <div class="section-heading"><h2>Saved locally</h2><button id="refresh-sessions" type="button">Refresh</button></div>
         <div id="sessions" class="sessions empty">No recordings yet.</div>
       </section>
+      <section id="call-panel" class="panel call-panel" hidden>
+        <h2 id="call-title"></h2>
+        <p id="call-state" role="status"></p>
+        <progress id="call-progress" max="1" aria-label="Call processing progress" hidden></progress>
+        <p id="call-error" class="alert" role="alert" hidden></p>
+        <audio id="call-audio" aria-label="Selected call recording" controls preload="metadata" hidden></audio>
+        <div class="button-row">
+          <button id="prepare-call" type="button" disabled>Prepare audio</button>
+          <button id="export-audio" type="button" disabled>Export audio</button>
+          <button id="transcribe-call" type="button" disabled aria-describedby="cloud-disclosure">Transcribe</button>
+          <button id="sign-in" type="button" hidden>Sign in to Kern</button>
+        </div>
+        <p class="hint" id="cloud-disclosure">Transcribe sends this recording to private Kern storage and Groq. Originals stay on this PC.</p>
+        <h3>Transcript</h3>
+        <pre id="transcript-text">No transcript yet.</pre>
+        <div class="button-row">
+          <button id="copy-transcript" type="button" disabled>Copy text</button>
+          <button id="export-transcript" type="button" disabled>Export text</button>
+        </div>
+        <details id="call-details">
+          <summary>Details</summary>
+          <ul id="call-warnings" class="hint"></ul>
+          <pre id="call-diagnostics"></pre>
+          <div class="section-heading"><span id="disk">Disk space unknown</span></div>
+          <div id="tracks" class="tracks empty">No active devices.</div>
+          <button id="call-folder" type="button">Open originals folder</button>
+        </details>
+      </section>
     </main>
-
     <template id="track-template">
       <article class="track">
-        <div class="track-copy">
-          <strong class="track-name"></strong>
-          <span class="track-health"></span>
-        </div>
-        <meter class="track-meter" min="0" max="1" value="0"></meter>
+        <div class="track-copy"><strong class="track-name"></strong><span class="track-health"></span></div>
+        <meter class="track-meter" min="0" max="1" value="0" aria-label="Audio level"></meter>
         <span class="track-detail"></span>
       </article>
     </template>
-
     <template id="session-template">
       <article class="session">
-        <div class="session-copy">
-          <strong class="session-name"></strong>
-          <span class="session-detail"></span>
-        </div>
+        <div class="session-copy"><strong class="session-name"></strong><span class="session-detail"></span></div>
         <div class="session-actions">
-          <button data-action="play" type="button">Play</button>
-          <button data-action="export" type="button">Export</button>
-          <button data-action="folder" type="button">Folder</button>
+          <button data-action="select" type="button">Open call</button>
           <button data-action="recover" type="button" hidden>Recover</button>
         </div>
-        <div class="players"></div>
       </article>
     </template>
-
+    <script src="format.js"></script>
+    <script src="capture.js"></script>
+    <script src="call-view.js"></script>
+    <script src="library.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

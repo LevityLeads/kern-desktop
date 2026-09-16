@@ -20,6 +20,7 @@ const { RecorderController } = require('./recorder/controller');
 const { isActiveState } = require('./recorder/protocol');
 const { RecorderSupervisor } = require('./recorder/supervisor');
 const { UpdateGuard } = require('./recorder/update-guard');
+const { CallProcessing } = require('./recorder/call-processing');
 
 // ------------------------------------------------------------------
 // Kern host resolution.
@@ -165,8 +166,32 @@ let setupWindow = null;
 let tray = null;
 let recorderController = null;
 let recorderSupervisor = null;
+let callProcessing = null;
 let updateGuard = null;
 let quitFinalising = false;
+let lastStartedSession = null;
+let lastStoppedSession = null;
+
+async function handleCaptureLifecycle(status) {
+  if (!callProcessing || !status || !status.sessionId) return;
+  const id = status.sessionId;
+  if (isActiveState(status.state) && lastStartedSession !== id) {
+    lastStartedSession = id;
+    try {
+      // Snapshot cloud-transcription consent at capture start, never retroactively.
+      const snapshot = await callProcessing.snapshotStartConsent();
+      await callProcessing.onStarted(id, snapshot);
+    } catch (error) { console.error('Call start hook failed:', error.message); }
+  }
+  if ((status.state === 'stopped' || status.state === 'interrupted') && lastStoppedSession !== id) {
+    lastStoppedSession = id;
+    callProcessing.onStopped(id).catch((error) => console.error('Call stop hook failed:', error.message));
+  }
+}
+
+function callSettingsPath() {
+  return path.join(app.getPath('userData'), 'call-settings.json');
+}
 
 function recordingIsActive() {
   return recorderSupervisor ? isActiveState(recorderSupervisor.status.state) : false;
@@ -591,6 +616,13 @@ function setupRecorder() {
     helperPath: bundledHelperPath(),
     powerSaveBlocker,
   });
+  callProcessing = new CallProcessing({
+    recordingsRoot: recordingsRoot(),
+    helperPath: bundledHelperPath(),
+    getSession: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.session : null),
+    getOrigin: () => kernUrl,
+    settingsPath: callSettingsPath(),
+  });
   recorderController = new RecorderController({
     BrowserWindow,
     ipcMain,
@@ -598,10 +630,21 @@ function setupRecorder() {
     appRoot: __dirname,
     recordingsRoot: recordingsRoot(),
     getParentWindow: () => mainWindow,
+    callProcessing,
+    focusMain: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Open Kern to sign in');
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    },
   });
-  recorderSupervisor.on('status', () => {
+  // The renderer polls getCall; a change event refreshes the tray/updater promptly.
+  callProcessing.on('change', () => updateTrayMenu());
+  callProcessing.start().catch((error) => console.error('Call processing resume failed:', error.message));
+  recorderSupervisor.on('status', (status) => {
     updateGuard?.captureStateChanged();
     updateTrayMenu();
+    handleCaptureLifecycle(status);
   });
 
   const shortcutRegistered = globalShortcut.register('CommandOrControl+Shift+R', () => showRecorder());
@@ -701,6 +744,7 @@ async function requestQuit() {
   quitFinalising = true;
   try {
     await recorderSupervisor?.shutdownForQuit();
+    await callProcessing?.stop();
   } finally {
     app.isQuitting = true;
     app.quit();
