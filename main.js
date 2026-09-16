@@ -647,8 +647,9 @@ function setupRecorder() {
     handleCaptureLifecycle(status);
   });
 
-  const shortcutRegistered = globalShortcut.register('CommandOrControl+Shift+R', () => showRecorder());
-  if (!shortcutRegistered) console.error('Recorder shortcut Ctrl+Shift+R could not be registered.');
+  // Ctrl+Shift+R is the browser/Kern hard-refresh; use Ctrl+Alt+R so we never steal it.
+  const shortcutRegistered = globalShortcut.register('CommandOrControl+Alt+R', () => showRecorder());
+  if (!shortcutRegistered) console.error('Recorder shortcut Ctrl+Alt+R could not be registered.');
   powerMonitor.on('suspend', () => {
     recorderSupervisor.suspend().catch((error) => reportRecorderCommandFailure('suspend', error));
   });

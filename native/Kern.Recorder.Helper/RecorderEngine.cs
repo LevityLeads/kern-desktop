@@ -72,7 +72,7 @@ internal sealed class RecorderEngine : IDisposable
 
             try
             {
-                foreach (var renderDevice in devices.ActiveRenderDevices())
+                foreach (var renderDevice in devices.DefaultRenderDevices())
                     AddTrack(renderDevice, "render", request.SegmentDurationMs);
                 AddTrack(devices.ResolveMicrophone(request.Microphone), "microphone", request.SegmentDurationMs);
                 if (tracks.Count == 0) throw new ProtocolException("no-audio-devices", "No supported audio endpoint is available.");
@@ -343,7 +343,7 @@ internal sealed class RecorderEngine : IDisposable
             lock (gate)
             {
                 if (state is "idle" or "stopped" or "interrupted") return;
-                var activeRenderIds = devices.ActiveRenderIds();
+                var defaultRenderIds = devices.DefaultRenderIds();
                 var activeCaptureIds = devices.ActiveCaptureIds();
                 var cutoff = clock.NowTicks;
                 foreach (var track in tracks)
@@ -352,7 +352,7 @@ internal sealed class RecorderEngine : IDisposable
                         track.EndpointId,
                         track.Kind == "render" ? DataFlow.Render : DataFlow.Capture));
                     var endpointIsActive = track.Kind == "render"
-                        ? activeRenderIds.Contains(track.EndpointId)
+                        ? defaultRenderIds.Contains(track.EndpointId)
                         : activeCaptureIds.Contains(track.EndpointId);
                     if (!track.IsRetired && !endpointIsActive)
                     {
@@ -364,7 +364,7 @@ internal sealed class RecorderEngine : IDisposable
                     }
                 }
 
-                foreach (var device in devices.ActiveRenderDevices())
+                foreach (var device in devices.DefaultRenderDevices())
                 {
                     try
                     {

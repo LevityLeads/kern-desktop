@@ -74,6 +74,44 @@ internal sealed class AudioDevices : IDisposable
         return result;
     }
 
+    // Only the default playback device(s) are captured: the multimedia default (what
+    // the user hears) and the communications default (where Teams/Zoom route calls),
+    // deduplicated. Virtual and idle endpoints (VB-Cable, Steam, Oculus, etc.) are not
+    // captured, which is what keeps a call to two real tracks: you and the other side.
+    public IReadOnlyList<MMDevice> DefaultRenderDevices()
+    {
+        var result = new List<MMDevice>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var role in new[] { Role.Multimedia, Role.Communications })
+            {
+                if (!enumerator.TryGetDefaultAudioEndpoint(DataFlow.Render, role, out var snapshot)) continue;
+                string id;
+                using (snapshot) id = snapshot.ID;
+                if (!ids.Add(id)) continue;
+                var device = enumerator.GetDevice(id);
+                if (device.State != DeviceState.Active) { device.Dispose(); continue; }
+                result.Add(device);
+            }
+        }
+        catch
+        {
+            foreach (var opened in result) opened.Dispose();
+            throw;
+        }
+        return result;
+    }
+
+    public HashSet<string> DefaultRenderIds()
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var role in new[] { Role.Multimedia, Role.Communications })
+            if (enumerator.TryGetDefaultAudioEndpoint(DataFlow.Render, role, out var device))
+                using (device) ids.Add(device.ID);
+        return ids;
+    }
+
     public HashSet<string> ActiveRenderIds() => ActiveEndpointIds(DataFlow.Render);
 
     public HashSet<string> ActiveCaptureIds() => ActiveEndpointIds(DataFlow.Capture);
