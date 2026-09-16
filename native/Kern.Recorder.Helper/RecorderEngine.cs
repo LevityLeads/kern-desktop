@@ -26,6 +26,7 @@ internal sealed class RecorderEngine : IDisposable
     private object? failure;
     private string? currentSessionPath;
     private bool disposed;
+    private long sessionOriginTicks;
 
     public RecorderEngine(AudioDevices devices, TimelineClock clock, Func<string, long>? availableFreeSpace = null)
     {
@@ -56,12 +57,15 @@ internal sealed class RecorderEngine : IDisposable
             failure = null;
             currentSessionPath = Path.GetFullPath(request.SessionPath);
             activeSegmentDurationMs = request.SegmentDurationMs;
+            sessionOriginTicks = clock.NowTicks;
             store = new SessionStore(currentSessionPath, new SessionManifest
             {
                 SessionId = request.SessionId,
                 State = "starting",
                 StartedAtUtc = startedAtUtc,
                 TimelineFrequency = TimelineClock.Frequency,
+                ManifestVersion = 2,
+                TimelineOriginTicks = sessionOriginTicks,
                 CaptureGeneration = fence.Generation,
             });
             sessionCancellation = new CancellationTokenSource();
@@ -96,7 +100,7 @@ internal sealed class RecorderEngine : IDisposable
                 }
                 state = "interrupted";
                 failure = new { code = "start-failed", message = error.Message };
-                store.SetState(state, TimelineClock.ToMilliseconds(cutoff), micMuted, fence.Generation, failure);
+                store.SetState(state, TimelineClock.ElapsedMilliseconds(sessionOriginTicks, cutoff), micMuted, fence.Generation, failure);
                 DisposeTracks();
                 throw;
             }
@@ -255,7 +259,7 @@ internal sealed class RecorderEngine : IDisposable
             sessionId,
             micMuted,
             startedAtUtc,
-            TimelineClock.ToMilliseconds(now),
+            TimelineClock.ElapsedMilliseconds(sessionOriginTicks, now),
             freeBytes,
             tracks.Select(track => track.Status(now)).ToList(),
             failure);
@@ -474,7 +478,7 @@ internal sealed class RecorderEngine : IDisposable
         }
         store.SetState(
             state,
-            TimelineClock.ToMilliseconds(clock.NowTicks),
+            TimelineClock.ElapsedMilliseconds(sessionOriginTicks, clock.NowTicks),
             micMuted,
             fence.Generation,
             failure,

@@ -185,6 +185,11 @@ internal sealed class CapturePacketProcessor : IDisposable
         if (frames == 0) return;
         if (writer is not null && writerPersistenceEpoch != packet.PersistenceEpoch)
             FinaliseWriter(packet.TimelineStartTicks);
+        // Never concatenate a missing interval or a backward/reset timestamp into
+        // one apparently continuous WAV. Permit only one source frame of QPC rounding.
+        if (writer is not null && Math.Abs((decimal)packet.TimelineStartTicks - writer.TimelineEndTicks) >
+            Math.Max(1, TimelineClock.DurationForFrames(1, format.SampleRate)))
+            FinaliseWriter(writer.TimelineEndTicks);
         var offsetFrames = 0;
         while (offsetFrames < frames)
         {

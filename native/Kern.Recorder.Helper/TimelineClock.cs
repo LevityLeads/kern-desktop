@@ -30,5 +30,7 @@ internal sealed class TimelineClock
     }
     public static long FramesBefore(long startTicks, long cutoffTicks, int sampleRate) =>
         cutoffTicks <= startTicks ? 0 : FramesForDuration(cutoffTicks - startTicks, sampleRate);
+    public static long ElapsedMilliseconds(long originTicks, long nowTicks) =>
+        ToMilliseconds(Math.Max(0, checked(nowTicks - originTicks)));
     public static long ToMilliseconds(long ticks) => Scale(ticks, 1000, Frequency);
 }
