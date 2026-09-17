@@ -29,6 +29,7 @@ internal sealed class CaptureTrack : IDisposable
     private long droppedFrames;
     private long lastHeartbeatTicks;
     private long? expectedDevicePosition;
+    private long consecutiveSilentFrames;
     private double peak;
     private string health = "unknown";
     private string? message;
@@ -319,13 +320,17 @@ internal sealed class CaptureTrack : IDisposable
                     health = peak > 0.0001 ? "capturing-signal" : "acquired-silence";
                     message = null;
                 }
-                // Digital silence is never written to disk. peak == 0 means every sample
-                // is exactly zero (a silent loopback endpoint or a muted source); the gap
-                // is reconstructed as silence at render time from segment timestamps. This
-                // is what stops idle playback devices writing gigabytes of blank audio.
-                // A live microphone's noise floor and any playing audio are never exactly
-                // zero, so real speech is always captured.
-                if (peak == 0) return;
+                // Drop only SUSTAINED digital silence so idle playback endpoints stop
+                // writing gigabytes of blank audio, WITHOUT fragmenting active audio.
+                // Short pauses (< 1s) are kept so a talking track stays one continuous
+                // segment; once silence runs past 1s (an idle endpoint or a long gap) we
+                // stop persisting, and the gap is reconstructed as silence at render time.
+                if (peak == 0)
+                {
+                    consecutiveSilentFrames += frames;
+                    if (consecutiveSilentFrames > Format.SampleRate) return;
+                }
+                else consecutiveSilentFrames = 0;
                 copy = buffer[..alignedBytes].ToArray();
                 packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch);
             }
