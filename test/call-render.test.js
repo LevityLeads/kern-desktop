@@ -31,6 +31,16 @@ test('render errors never expose native output or private paths', async () => {
   process.emit('error', new Error('secret private path'));
   await assert.rejects(work, error => error.code === 'render-start' && !error.message.includes('secret'));
 });
+test('native exit categories survive without exposing raw stderr', async () => {
+  for (const [exit, code] of [[20,'render-validation'],[21,'render-permission'],[22,'render-io'],[23,'render-internal'],[99,'render-failed']]) {
+    const process = child();
+    const work = renderCall('/private/helper', '/private/session', {spawnProcess:()=>process});
+    process.stderr.emit('data', Buffer.from('secret private path'));
+    process.emit('close', exit);
+    await assert.rejects(work, error => error.code === code && !error.message.includes('secret'));
+  }
+});
+
 test('abort kills only processing child and waits for close', async () => {
   const process = child(), controller = new AbortController();
   let killed = false;

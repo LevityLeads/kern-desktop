@@ -60,6 +60,7 @@ window.createCallView = function createCallView({ api, reportError }) {
       state: selected.state, durationMs: selected.durationMs, trackCount: selected.trackCount,
       segmentCount: selected.segmentCount, captureFailure: selected.failure || null,
       processingState: state, progress: call.progress ?? null, error: call.error || null,
+      processingStage: call.processingStage || null, errorCode: call.errorCode || null,
       warnings: call.warnings || [],
       tracks: diagnostics?.tracks || [], gaps: diagnostics?.gaps || [],
     }, null, 2);

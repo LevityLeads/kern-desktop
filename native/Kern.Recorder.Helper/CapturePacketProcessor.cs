@@ -25,6 +25,7 @@ internal sealed class CapturePacketProcessor : IDisposable
     private long lastWriteTicks;
     private bool writerFailed;
     private bool disposed;
+    private readonly PacketTimeline timeline;
 
     public CapturePacketProcessor(
         string sessionPath,
@@ -40,6 +41,7 @@ internal sealed class CapturePacketProcessor : IDisposable
         this.sessionPath = sessionPath;
         this.trackId = trackId;
         this.format = format;
+        timeline = new PacketTimeline(format.SampleRate);
         this.clock = clock;
         this.onSegmentFinalised = onSegmentFinalised;
         this.onFailure = onFailure;
@@ -125,7 +127,7 @@ internal sealed class CapturePacketProcessor : IDisposable
                 ProcessPacket(pendingPacket);
                 RemovePending(pendingPacket);
             }
-            pendingPacket = packet;
+            pendingPacket = timeline.Map(packet, packet.FrameCount(format.BlockAlign));
         }
         catch (Exception error)
         {
@@ -146,6 +148,7 @@ internal sealed class CapturePacketProcessor : IDisposable
                 if (pendingPacket is not null) RemovePending(pendingPacket);
                 pendingPacket = null;
                 FinaliseWriter(flush.CutoffTicks);
+                timeline.Reset();
             }
             flush.Completion.TrySetResult();
         }
@@ -168,7 +171,7 @@ internal sealed class CapturePacketProcessor : IDisposable
             return;
         }
         var permittedFrames = CaptureTrack.FramesStrictlyBefore(
-            packet.TimelineStartTicks,
+            Math.Max(packet.TimelineStartTicks, packet.OriginalStartTicks ?? packet.TimelineStartTicks),
             flush.CutoffTicks,
             packet.FrameCount(format.BlockAlign),
             format.SampleRate);
@@ -185,10 +188,8 @@ internal sealed class CapturePacketProcessor : IDisposable
         if (frames == 0) return;
         if (writer is not null && writerPersistenceEpoch != packet.PersistenceEpoch)
             FinaliseWriter(packet.TimelineStartTicks);
-        // Never concatenate a missing interval or a backward/reset timestamp into
-        // one apparently continuous WAV. Permit only one source frame of QPC rounding.
-        if (writer is not null && Math.Abs((decimal)packet.TimelineStartTicks - writer.TimelineEndTicks) >
-            Math.Max(1, TimelineClock.DurationForFrames(1, format.SampleRate)))
+        // New runs carry an actual position/epoch/trust boundary, not packet QPC jitter.
+        if (writer is not null && packet.StartsNewRun)
             FinaliseWriter(writer.TimelineEndTicks);
         var offsetFrames = 0;
         while (offsetFrames < frames)
@@ -291,7 +292,13 @@ internal sealed record AudioPacket(
     long QpcPosition,
     long TimelineStartTicks,
     long Generation,
-    long PersistenceEpoch)
+    long PersistenceEpoch,
+    bool PositionTrusted = true,
+    bool Discontinuity = false,
+    long ContinuityId = 0,
+    long? OriginalStartTicks = null,
+    bool StartsNewRun = false,
+    long? ObservedAtTicks = null)
 {
     public int FrameCount(int blockAlign) => Data.Length / blockAlign;
 }

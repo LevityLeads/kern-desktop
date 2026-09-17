@@ -39,9 +39,11 @@ function wavFormat(track, segment) {
   const f = track?.format;
   if (!f || !Number.isInteger(f.sampleRate) || f.sampleRate < 8000 || f.sampleRate > 192000 ||
       !Number.isInteger(f.channels) || f.channels < 1 || f.channels > 8 || !Number.isSafeInteger(segment.sampleCount)) fail();
+  const encoding = new Map([['pcm', 'pcm'], ['Pcm', 'pcm'], ['ieeefloat', 'ieeefloat'],
+    ['IeeeFloat', 'ieeefloat'], ['extensible', 'extensible'], ['Extensible', 'extensible']]).get(f.encoding);
   let format;
-  if (f.encoding === 'Pcm' || (f.encoding === 'Extensible' && String(f.subFormat).toLowerCase() === '00000001-0000-0010-8000-00aa00389b71')) format = 'pcm';
-  if (f.encoding === 'IeeeFloat' || (f.encoding === 'Extensible' && String(f.subFormat).toLowerCase() === '00000003-0000-0010-8000-00aa00389b71')) format = 'float';
+  if (encoding === 'pcm' || (encoding === 'extensible' && String(f.subFormat).toLowerCase() === '00000001-0000-0010-8000-00aa00389b71')) format = 'pcm';
+  if (encoding === 'ieeefloat' || (encoding === 'extensible' && String(f.subFormat).toLowerCase() === '00000003-0000-0010-8000-00aa00389b71')) format = 'float';
   if (!format || (format === 'float' ? f.bitsPerSample !== 32 : ![8, 16, 24, 32].includes(f.bitsPerSample))) fail();
   return { sampleRate: f.sampleRate, channels: f.channels, bitsPerSample: f.bitsPerSample, format, frames: segment.sampleCount };
 }

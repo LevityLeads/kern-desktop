@@ -11,7 +11,7 @@ const { createRecorderWindow } = require('./window');
 
 class RecorderController {
   constructor({ BrowserWindow, ipcMain, supervisor, appRoot, recordingsRoot, getParentWindow,
-    callProcessing, focusMain }) {
+    callProcessing, focusMain, microphonePreference }) {
     this.BrowserWindow = BrowserWindow;
     this.supervisor = supervisor;
     this.appRoot = appRoot;
@@ -24,6 +24,8 @@ class RecorderController {
       ipcMain, getRecorderWindow: () => this.window, supervisor,
       trustedRecorderUrl: pathToFileURL(path.join(appRoot, 'recorder-ui', 'index.html')).href,
       handlers: {
+        getMicrophone: () => microphonePreference.get(),
+        setMicrophone: selection => microphonePreference.set(selection),
         listSessions: () => catalog.listSessions(recordingsRoot),
         getSession: (id) => catalog.readManifest(recordingsRoot, id),
         getPlaybackUrl: (payload) => catalog.buildPlaybackUrl(recordingsRoot, payload),

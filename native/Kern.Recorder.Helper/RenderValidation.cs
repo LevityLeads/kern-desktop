@@ -45,15 +45,16 @@ internal static class RenderValidation
             var pathParts = segment.RelativePath.Replace('\\', '/').Split('/');
             if (pathParts.Length is not (2 or 3) || (pathParts.Length == 3 && pathParts[1] != segment.TrackId))
                 throw new InvalidDataException("Source path is outside its declared track directory.");
-            ValidateFormat(track.Format);
-            ValidateSegment(paths, segment, track.Format);
+            var format = CanonicalFormat(track.Format);
+            ValidateFormat(format);
+            ValidateSegment(paths, segment, format);
             var start = Scale(segment.TimelineStartTicks - origin, RenderConstants.Rate, session.TimelineFrequency);
             var frames = Scale(segment.SampleCount, RenderConstants.Rate, track.Format.SampleRate);
             if (frames == 0) throw new InvalidDataException("Source segment is shorter than one output sample.");
             var reportedFrames = Scale(segment.TimelineEndTicks - segment.TimelineStartTicks,
                 RenderConstants.Rate, session.TimelineFrequency);
             if (Math.Abs(reportedFrames - frames) > RenderConstants.Rate / 50) timingMismatches++;
-            inputs.Add(new RenderInput(segment, track.Format, start, frames));
+            inputs.Add(new RenderInput(segment, format, start, frames));
             sampleCount = Math.Max(sampleCount, checked(start + frames));
         }
         foreach (var group in inputs.GroupBy(input => input.Segment.TrackId))
@@ -80,6 +81,8 @@ internal static class RenderValidation
 
     public static void ValidateSegment(RenderPaths paths, SegmentManifest segment, TrackFormat format)
     {
+        format = CanonicalFormat(format);
+        ValidateFormat(format);
         using var stream = paths.OpenRead(segment.RelativePath);
         if (stream.Length != segment.ByteLength || !Hash(stream).Equals(segment.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"Source integrity failed: {segment.SegmentId}");
@@ -97,6 +100,19 @@ internal static class RenderValidation
     public static string Hash(Stream stream) => Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     public static bool IsHash(string? hash) => hash is { Length: 64 } && hash.All(Uri.IsHexDigit);
     public static long Scale(long value, long numerator, long denominator) => checked((long)((Int128)value * numerator / denominator));
+    private static TrackFormat CanonicalFormat(TrackFormat format)
+    {
+        if (format is null) throw new InvalidDataException("Missing source audio format.");
+        var encoding = format.Encoding switch
+        {
+            "pcm" or "Pcm" => "Pcm",
+            "ieeefloat" or "IeeeFloat" => "IeeeFloat",
+            "extensible" or "Extensible" => "Extensible",
+            _ => throw new InvalidDataException("Unsupported source audio format."),
+        };
+        return format with { Encoding = encoding };
+    }
+
     private static void ValidateFormat(TrackFormat format)
     {
         if (format is null || format.SampleRate is < 8000 or > 192000 || format.Channels is < 1 or > 32 ||

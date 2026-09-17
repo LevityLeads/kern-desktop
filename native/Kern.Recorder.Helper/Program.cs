@@ -34,6 +34,14 @@ internal static class Program
         catch (Exception error)
         {
             Console.Error.WriteLine($"{error.GetType().Name}: {error.Message}");
+            if (args.Length > 0 && args[0] == "--render")
+                return error switch
+                {
+                    InvalidDataException => 20,
+                    UnauthorizedAccessException => 21,
+                    IOException => 22,
+                    _ => 23,
+                };
             return 1;
         }
     }

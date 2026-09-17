@@ -30,6 +30,7 @@ internal sealed class CaptureTrack : IDisposable
     private long lastHeartbeatTicks;
     private long? expectedDevicePosition;
     private long consecutiveSilentFrames;
+    private long continuityId;
     private double peak;
     private string health = "unknown";
     private string? message;
@@ -274,16 +275,23 @@ internal sealed class CaptureTrack : IDisposable
                 // device position reported alongside it must not be compared, advanced,
                 // or persisted. Treat the running position as unknown for this packet.
                 var positionTrusted = !flags.HasFlag(AudioClientBufferFlags.TimestampError);
-                if (flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity))
+                var discontinuity = flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity);
+                if (!positionTrusted || discontinuity) continuityId++;
+                if (discontinuity)
                 {
-                    // The flag alone means samples were lost, whether or not a prior
-                    // position exists. Only derive a frame count from a trustworthy,
-                    // monotonic position; otherwise record the loss without inventing one.
+                    // WASAPI flags stream transitions as well as glitches. Count only
+                    // a measured forward gap; do not claim every flag lost samples.
                     if (positionTrusted && expectedDevicePosition is long expected && devicePosition > expected)
+                    {
                         droppedFrames += devicePosition - expected;
-                    dataLossDetected = true;
-                    health = "failed";
-                    message = "Capture endpoint reported an audio discontinuity.";
+                        dataLossDetected = true;
+                        health = "failed";
+                        message = "Capture endpoint skipped audio frames.";
+                    }
+                    else
+                    {
+                        message = "Capture endpoint reported a timing discontinuity; a new audio run was started.";
+                    }
                 }
                 expectedDevicePosition = positionTrusted ? checked(devicePosition + frames) : null;
                 sampleCount += frames;
@@ -296,8 +304,16 @@ internal sealed class CaptureTrack : IDisposable
                 }
 
                 var hasValidTimestamp = qpcPosition > 0 && !flags.HasFlag(AudioClientBufferFlags.TimestampError);
-                var packetStart = hasValidTimestamp ? clock.FromQpc100Nanoseconds(qpcPosition) : callbackTicks;
-                if (!hasValidTimestamp) qpcPosition = 0;
+                if (!hasValidTimestamp)
+                {
+                    continuityId++;
+                    droppedFrames += frames;
+                    dataLossDetected = true;
+                    health = "failed";
+                    message = "Audio packet omitted because its capture timestamp was unavailable.";
+                    return;
+                }
+                var packetStart = clock.FromQpc100Nanoseconds(qpcPosition);
                 var skipFrames = FramesStrictlyBefore(
                     packetStart,
                     minimumPersistenceTicks,
@@ -318,7 +334,7 @@ internal sealed class CaptureTrack : IDisposable
                 if (!dataLossDetected && !writerFailed)
                 {
                     health = peak > 0.0001 ? "capturing-signal" : "acquired-silence";
-                    message = null;
+                    if (!discontinuity) message = null;
                 }
                 // Drop only SUSTAINED digital silence so idle playback endpoints stop
                 // writing gigabytes of blank audio, WITHOUT fragmenting active audio.
@@ -332,7 +348,9 @@ internal sealed class CaptureTrack : IDisposable
                 }
                 else consecutiveSilentFrames = 0;
                 copy = buffer[..alignedBytes].ToArray();
-                packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch);
+                packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch,
+                    PositionTrusted: positionTrusted && hasValidTimestamp, Discontinuity: discontinuity,
+                    ContinuityId: continuityId, ObservedAtTicks: callbackTicks);
             }
 
             if (packet is not null && packetProcessor.TryEnqueue(packet)) return;

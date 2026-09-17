@@ -25,6 +25,7 @@ async function bind(processor, state) {
 async function processCall(processor, state) {
   const { store, http } = processor;
   const signal = processor.abort.signal;
+  state.processingStage = 'locate-recording';
   const id = state.sessionId, dir = await store.directory(id);
   if (state.cloudHold && !state.preparePending) return;
   if (state.remoteId && state.uploadFinalized && !state.preparePending && !state.explicitRetry) {
@@ -36,11 +37,15 @@ async function processCall(processor, state) {
   let validated;
   state.state = 'preparing'; state.error = null;
   await processor.save(state);
+  state.processingStage = 'validate-derived';
   try { validated = await validateDerived(dir, id, { signal }); }
   catch (error) {
     if (signal.aborted) throw new CallError('cancelled', 'Processing paused.');
+    state.processingStage = 'validate-source';
     await sourceManifest(dir, id, signal);
+    state.processingStage = 'render-audio';
     await renderCall(processor.helperPath, dir, { signal, spawnProcess: processor.spawnProcess });
+    state.processingStage = 'validate-rendered-audio';
     validated = await validateDerived(dir, id, { signal });
   }
   if (state.remoteId && state.fingerprint !== validated.fingerprint) {
@@ -51,7 +56,7 @@ async function processCall(processor, state) {
   state.playbackUrl = pathToFileURL(validated.playbackFile).toString();
   state.preparePending = false;
   state.warnings = validated.derived.warnings;
-  state.state = 'ready'; state.progress = 1;
+  state.state = 'ready'; state.progress = 1; state.processingStage = 'ready'; state.errorCode = null;
   await processor.save(state);
   if (!state.requested || !state.consent || state.cloudHold) return;
   if (!state.origin || state.origin !== http.origin()) throw new CallError('origin-changed', 'Kern connection changed. Cloud upload is paused.');

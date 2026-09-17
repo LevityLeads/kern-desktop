@@ -13,6 +13,34 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
   let hydrated = false;
   let statusRevision = 0;
   let receivedAt = Date.now();
+  let microphone = { mode: 'default' };
+  let preferenceReady = false;
+  let preferenceLoading = true;
+  let devicesReady = false;
+  let devicesPending = false;
+  let savingMicrophone = false;
+  let captureEndpoints = [];
+
+  function microphoneAvailable() {
+    return captureEndpoints.some(endpoint => endpoint.supported !== false &&
+      (microphone.mode === 'device' ? endpoint.id === microphone.deviceId
+        : endpoint.defaultRoles?.includes('communications')));
+  }
+
+  function renderMicrophones() {
+    el.microphone.replaceChildren(new Option('Windows default communications microphone', 'default'));
+    for (const endpoint of captureEndpoints) {
+      const option = new Option(endpoint.name, `device:${endpoint.id}`);
+      option.disabled = endpoint.supported === false;
+      el.microphone.add(option);
+    }
+    if (microphone.mode === 'device' && !captureEndpoints.some(e => e.id === microphone.deviceId)) {
+      const missing = new Option('Selected microphone unavailable. Reconnect it or choose another.', `device:${microphone.deviceId}`);
+      missing.disabled = true;
+      el.microphone.add(missing);
+    }
+    el.microphone.value = microphone.mode === 'device' ? `device:${microphone.deviceId}` : 'default';
+  }
 
   function updateTimer() {
     const running = ['recording', 'degraded'].includes(status.state);
@@ -45,8 +73,10 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
     const pending = commandPending || pendingStates.has(state);
     el.state.textContent = state.replaceAll('-', ' ');
     el.state.className = `state ${state}`;
-    el.start.disabled = !hydrated || active || pending || !el.consent.checked;
-    el.microphone.disabled = active || pending;
+    el.start.disabled = !hydrated || active || pending || !el.consent.checked ||
+      !preferenceReady || !devicesReady || devicesPending || savingMicrophone || !microphoneAvailable();
+    el.microphone.disabled = active || pending || preferenceLoading || devicesPending || savingMicrophone;
+    el['refresh-devices'].disabled = active || pending || preferenceLoading || devicesPending || savingMicrophone;
     el.pause.disabled = !active || pending || state === 'suspended';
     el.pause.textContent = state === 'paused' ? 'Resume' : 'Pause';
     el.mute.disabled = !active || pending || state === 'suspended';
@@ -82,26 +112,36 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
   }
 
   async function loadDevices() {
-    el['refresh-devices'].disabled = true;
+    if (preferenceLoading || devicesPending || commandPending || activeStates.has(status.state)) return;
+    devicesPending = true;
+    devicesReady = false;
+    renderControls();
     try {
       const result = await api.listDevices();
-      const previous = el.microphone.value;
-      el.microphone.replaceChildren(new Option('Default microphone, pinned when recording starts', 'default'));
-      for (const microphone of result.captureEndpoints || []) {
-        const option = new Option(microphone.name, `device:${microphone.id}`);
-        option.disabled = microphone.supported === false;
-        el.microphone.add(option);
-      }
-      if ([...el.microphone.options].some((option) => option.value === previous)) el.microphone.value = previous;
+      captureEndpoints = result.captureEndpoints || [];
+      devicesReady = true;
+      renderMicrophones();
     } catch (error) { reportError(error); }
-    finally { el['refresh-devices'].disabled = false; renderControls(); }
+    finally { devicesPending = false; renderControls(); }
   }
 
-  el.start.addEventListener('click', () => command(() => {
+  el.microphone.addEventListener('change', async () => {
     const selected = el.microphone.value;
-    return api.start(selected.startsWith('device:')
-      ? { mode: 'device', deviceId: selected.slice(7) } : { mode: 'default' });
-  }));
+    const choice = selected.startsWith('device:')
+      ? { mode: 'device', deviceId: selected.slice(7) } : { mode: 'default' };
+    savingMicrophone = true;
+    preferenceReady = false;
+    renderControls();
+    try {
+      microphone = await api.setMicrophone(choice);
+      preferenceReady = true;
+    } catch (error) { reportError(error); }
+    finally { savingMicrophone = false; renderMicrophones(); renderControls(); }
+  });
+  el.start.addEventListener('click', () => {
+    if (el.start.disabled) return;
+    return command(() => api.start(microphone));
+  });
   el.pause.addEventListener('click', () => command(() => status.state === 'paused' ? api.resume() : api.pause()));
   el.mute.addEventListener('click', () => command(() => api.setMicMuted(!status.micMuted)));
   el.stop.addEventListener('click', () => command(() => api.stop()));
@@ -117,7 +157,11 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
   api.getStatus().then((snapshot) => {
     if (revision === statusRevision) { hydrated = true; renderStatus(snapshot); }
   }).catch(reportError);
-  loadDevices();
+  api.getMicrophone().then(selection => {
+    microphone = selection;
+    preferenceReady = true;
+    renderMicrophones();
+  }).catch(reportError).finally(() => { preferenceLoading = false; renderControls(); loadDevices(); });
   return {
     activeSessionId: () => activeStates.has(status.state) ? status.sessionId : null,
     dispose() { unsubscribe(); if (timer) clearInterval(timer); },

@@ -144,6 +144,91 @@ public sealed class CapturePacketProcessorTests : IDisposable
         Assert.Equal(1, segment.Generation);
     }
 
+    [Theory]
+    [InlineData(100)]
+    [InlineData(1000)]
+    public void ContinuousDeviceFramesIgnorePacketTimestampJitter(int packets)
+    {
+        var segments = new List<SegmentManifest>();
+        using var processor = new CapturePacketProcessor(root, "render-test", new WaveFormat(SampleRate, 16, 2),
+            5000, packets + 1, new TimelineClock(), segments.Add, (error, _) => throw error);
+        for (var i = 0; i < packets; i++)
+        {
+            var jitter = i % 2 == 0 ? 0 : TimelineClock.Frequency / 10_000;
+            Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(i * 480L) + jitter, 1, 1)
+                with { DevicePosition = i * 480L }));
+        }
+        processor.Flush(FrameTicks(packets * 480L + 480), 1);
+        Assert.Equal((packets + 499) / 500, segments.Count);
+        Assert.Equal(packets * 480L, segments.Sum(s => s.SampleCount));
+        Assert.Equal(FrameTicks(packets * 480L), segments[^1].TimelineEndTicks);
+    }
+
+    [Theory]
+    [InlineData(960, true, false)]
+    [InlineData(0, true, false)]
+    [InlineData(480, false, false)]
+    [InlineData(480, true, true)]
+    public void RealPositionAndTrustBoundariesRemainSeparate(long nextPosition, bool trusted, bool discontinuity)
+    {
+        var segments = new List<SegmentManifest>();
+        using var processor = CreateProcessor(segments);
+        Assert.True(processor.TryEnqueue(Packet(480, 0, 1, 1)));
+        Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(960), 1, 1)
+            with { DevicePosition = nextPosition, PositionTrusted = trusted, Discontinuity = discontinuity }));
+        processor.Flush(FrameTicks(1440), 1);
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
+        Assert.Equal(960, segments.Sum(s => s.SampleCount));
+    }
+
+    [Fact]
+    public void FutureRawTimestampCannotBeHiddenByContinuousDeviceFrames()
+    {
+        var segments = new List<SegmentManifest>();
+        Exception? failure = null;
+        using var processor = new CapturePacketProcessor(root, "render-test", new WaveFormat(SampleRate, 16, 2),
+            5000, 32, new TimelineClock(), segments.Add, (error, _) => failure = error);
+        Assert.True(processor.TryEnqueue(Packet(480, 0, 1, 1) with { ObservedAtTicks = FrameTicks(480) }));
+        Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(4800), 1, 1)
+            with { DevicePosition = 480, ObservedAtTicks = FrameTicks(960) }));
+        Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(960), 1, 1)
+            with { DevicePosition = 960, ObservedAtTicks = FrameTicks(1440) }));
+        processor.Flush(FrameTicks(1440), 1);
+        Assert.IsType<InvalidDataException>(failure);
+        Assert.DoesNotContain(segments, segment => segment.SampleCount > 480);
+    }
+
+    [Fact]
+    public void MappingCannotPublishFramesBeyondCallbackAndFutureStop()
+    {
+        var segments = new List<SegmentManifest>();
+        using var processor = CreateProcessor(segments);
+        for (var i = 0; i < 23; i++)
+        {
+            var start = TimelineClock.Frequency * i * 9 / 1000;
+            Assert.True(processor.TryEnqueue(Packet(480, start, 1, 1) with
+                { DevicePosition = i * 480, ObservedAtTicks = start + FrameTicks(480) }));
+        }
+        var cutoff = TimelineClock.Frequency * 207 / 1000;
+        processor.Flush(cutoff, 1);
+        Assert.All(segments, segment => Assert.True(segment.TimelineStartTicks + FrameTicks(segment.SampleCount) <= cutoff));
+    }
+
+    [Fact]
+    public void JitteredFenceUsesBothRawAndMappedCutoff()
+    {
+        var segments = new List<SegmentManifest>();
+        using var processor = CreateProcessor(segments);
+        Assert.True(processor.TryEnqueue(Packet(480, 0, 1, 1)));
+        Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(504), 1, 1) with { DevicePosition = 480 }));
+        processor.Flush(FrameTicks(720), 1);
+        var segment = Assert.Single(segments);
+        Assert.Equal(696, segment.SampleCount);
+        using var reader = new WaveFileReader(Path.Combine(root, segment.RelativePath));
+        Assert.Equal(696 * BlockAlign, reader.Length);
+    }
+
     private CapturePacketProcessor CreateProcessor(List<SegmentManifest> segments)
     {
         Directory.CreateDirectory(root);
@@ -168,7 +253,7 @@ public sealed class CapturePacketProcessorTests : IDisposable
         long persistenceEpoch) =>
         new(
             new byte[frameCount * BlockAlign],
-            DevicePosition: 0,
+            DevicePosition: TimelineClock.FramesForDuration(timelineStartTicks, SampleRate),
             QpcPosition: 10_000,
             timelineStartTicks,
             generation,

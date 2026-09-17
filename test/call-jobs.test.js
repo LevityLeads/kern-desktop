@@ -69,6 +69,26 @@ test('uploadInventory rejects calls longer than two hours', async () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('upload inventory accepts capture and legacy encoding casing without accepting aliases', async () => {
+  const dir = tmp();
+  try {
+    fs.mkdirSync(path.join(dir, 'segments'));
+    const body = Buffer.alloc(100);
+    fs.writeFileSync(path.join(dir, 'segments', 'test.wav'), body);
+    const segment = {status:'finalised', relativePath:'segments/test.wav', trackId:'track',
+      sampleCount:7, byteLength:100, sha256:crypto.createHash('sha256').update(body).digest('hex')};
+    for (const encoding of ['pcm','Pcm','ieeefloat','IeeeFloat','extensible','Extensible']) {
+      const track = {trackId:'track',format:{encoding,sampleRate:48000,channels:2,bitsPerSample:32,
+        subFormat:'00000003-0000-0010-8000-00aa00389b71'}};
+      const validated = {manifest:{segments:[segment],tracks:[track]},fingerprint:'f'.repeat(64),derived:{sampleCount:16000,windows:[]}};
+      const inventory = await uploadInventory(dir, SESSION, validated);
+      assert.equal(inventory.files[0].object.wav.format, encoding.toLowerCase()==='pcm'?'pcm':'float');
+      track.format.encoding='float';
+      await assert.rejects(uploadInventory(dir, SESSION, validated));
+    }
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('originOf demands https without credentials', () => {
   assert.equal(originOf('https://kern.example.org/app'), 'https://kern.example.org');
   for (const bad of ['http://kern.example.org', 'https://u:p@kern.example.org', 'not a url']) {

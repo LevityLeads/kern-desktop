@@ -611,6 +611,8 @@ function createWindow() {
 // Local recorder
 // ------------------------------------------------------------------
 function setupRecorder() {
+  const { MicrophonePreference } = require('./recorder/microphone-preference');
+  const microphonePreference = new MicrophonePreference(path.join(app.getPath('userData'), 'recorder-settings.json'));
   recorderSupervisor = new RecorderSupervisor({
     recordingsRoot: recordingsRoot(),
     helperPath: bundledHelperPath(),
@@ -627,6 +629,7 @@ function setupRecorder() {
     BrowserWindow,
     ipcMain,
     supervisor: recorderSupervisor,
+    microphonePreference,
     appRoot: __dirname,
     recordingsRoot: recordingsRoot(),
     getParentWindow: () => mainWindow,

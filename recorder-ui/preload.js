@@ -6,6 +6,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const IPC = Object.freeze({
   STATUS: 'kern-recorder:status',
   GET_STATUS: 'kern-recorder:get-status',
+  GET_MICROPHONE: 'kern-recorder:get-microphone',
+  SET_MICROPHONE: 'kern-recorder:set-microphone',
   LIST_DEVICES: 'kern-recorder:list-devices',
   LIST_SESSIONS: 'kern-recorder:list-sessions',
   GET_SESSION: 'kern-recorder:get-session',
@@ -30,6 +32,8 @@ const IPC = Object.freeze({
 
 contextBridge.exposeInMainWorld('kernRecorder', Object.freeze({
   getStatus: () => ipcRenderer.invoke(IPC.GET_STATUS),
+  getMicrophone: () => ipcRenderer.invoke(IPC.GET_MICROPHONE),
+  setMicrophone: (selection) => ipcRenderer.invoke(IPC.SET_MICROPHONE, selection),
   listDevices: () => ipcRenderer.invoke(IPC.LIST_DEVICES),
   listSessions: () => ipcRenderer.invoke(IPC.LIST_SESSIONS),
   getSession: (sessionId) => ipcRenderer.invoke(IPC.GET_SESSION, { sessionId }),

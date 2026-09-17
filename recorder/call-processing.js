@@ -123,6 +123,7 @@ class CallProcessing extends EventEmitter {
       } catch { /* Never expose a persisted file URL or a path outside this call. */ }
     }
     return { state: state.state, progress: state.progress || 0, error: state.error || null,
+      processingStage: state.processingStage || null, errorCode: state.errorCode || null,
       playbackUrl, transcript: state.transcript || null, warnings: state.warnings || [] };
   }
   async getPlaybackFile(id) {
@@ -160,7 +161,10 @@ class CallProcessing extends EventEmitter {
           await processCall(this, state);
         } catch (error) {
           if (!state || this.closed || error.code === 'cancelled') return;
-          state.error = error instanceof CallError ? error.message : 'Call processing failed. Original audio is safe.';
+          state.errorCode = error instanceof CallError ? error.code
+            : ['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO'].includes(error.code) ? error.code : 'unexpected-error';
+          state.error = error instanceof CallError ? error.message
+            : `Call processing failed at ${state.processingStage || 'unknown-stage'} (${state.errorCode}). Original audio is safe.`;
           if (error.code === 'auth') { state.state = 'sign-in-required'; state.cloudHold = true; }
           else if (error.retry && state.retryCount < 8) {
             state.state = 'retrying'; state.retryCount += 1;

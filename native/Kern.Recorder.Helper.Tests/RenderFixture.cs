@@ -9,14 +9,14 @@ internal sealed class RenderFixture : IDisposable
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "kern-render-test-" + Guid.NewGuid().ToString("N"));
     public SessionManifest Session { get; }
-    public RenderFixture(long durationMs = 1000, int version = 2, long origin = 0)
+    public RenderFixture(long durationMs = 1000, int version = 2, long origin = 0, long frequency = 10_000_000)
     {
         Directory.CreateDirectory(Root);
         Session = new SessionManifest
         {
             SessionId = Guid.NewGuid().ToString("D"), State = "stopped", StartedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
             EndedAtUtc = DateTimeOffset.UtcNow.ToString("O"), ManifestVersion = version,
-            TimelineFrequency = 10_000_000, TimelineOriginTicks = version == 2 ? origin : null, DurationMs = durationMs,
+            TimelineFrequency = frequency, TimelineOriginTicks = version == 2 ? origin : null, DurationMs = durationMs,
         };
     }
     public SegmentManifest Add(float amplitude, long startMs = 0, int durationMs = 1000, int rate = 16000,

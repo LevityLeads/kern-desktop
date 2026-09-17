@@ -21,6 +21,8 @@ function registerRecorderIpc({ ipcMain, getRecorderWindow, supervisor, handlers,
   };
   const operations = {
     [IPC.GET_STATUS]: () => supervisor.snapshot(),
+    [IPC.GET_MICROPHONE]: () => handlers.getMicrophone(),
+    [IPC.SET_MICROPHONE]: payload => handlers.setMicrophone(payload),
     [IPC.LIST_DEVICES]: () => supervisor.listDevices(),
     [IPC.LIST_SESSIONS]: () => handlers.listSessions(),
     [IPC.GET_SESSION]: payload => handlers.getSession(payload.sessionId),

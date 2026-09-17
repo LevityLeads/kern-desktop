@@ -3,6 +3,8 @@
 const IPC = Object.freeze({
   STATUS: 'kern-recorder:status',
   GET_STATUS: 'kern-recorder:get-status',
+  GET_MICROPHONE: 'kern-recorder:get-microphone',
+  SET_MICROPHONE: 'kern-recorder:set-microphone',
   GET_CALL: 'kern-recorder:get-call',
   PREPARE_CALL: 'kern-recorder:prepare-call',
   TRANSCRIBE: 'kern-recorder:transcribe',
@@ -92,7 +94,11 @@ function validateStartPayload(payload) {
     throw new TypeError('Recording consent reminder must be acknowledged');
   }
 
-  const microphone = assertPlainObject(value.microphone, 'microphone');
+  return { consentAcknowledged: true, microphone: validateMicrophoneSelection(value.microphone) };
+}
+
+function validateMicrophoneSelection(value) {
+  const microphone = assertPlainObject(value, 'microphone');
   assertOnlyKeys(microphone, ['mode', 'deviceId'], 'microphone');
   if (microphone.mode !== 'default' && microphone.mode !== 'device') {
     throw new TypeError('microphone.mode must be default or device');
@@ -102,13 +108,9 @@ function validateStartPayload(payload) {
     throw new TypeError('microphone.deviceId is only valid in device mode');
   }
 
-  return {
-    consentAcknowledged: true,
-    microphone:
-      microphone.mode === 'device'
-        ? { mode: 'device', deviceId: microphone.deviceId }
-        : { mode: 'default' },
-  };
+  return microphone.mode === 'device'
+    ? { mode: 'device', deviceId: microphone.deviceId }
+    : { mode: 'default' };
 }
 
 function validateMicMutePayload(payload) {
@@ -145,6 +147,8 @@ function validateRendererPayload(channel, payload) {
   switch (channel) {
     case IPC.START:
       return validateStartPayload(payload);
+    case IPC.SET_MICROPHONE:
+      return validateMicrophoneSelection(payload);
     case IPC.SET_MIC_MUTED:
       return validateMicMutePayload(payload);
     case IPC.SET_TRANSCRIPTION_ENABLED: {
@@ -165,6 +169,7 @@ function validateRendererPayload(channel, payload) {
       return validateSessionPayload(payload);
     case IPC.GET_PLAYBACK_URL:
       return validatePlaybackPayload(payload);
+    case IPC.GET_MICROPHONE:
     case IPC.GET_STATUS:
     case IPC.GET_TRANSCRIPTION_ENABLED:
     case IPC.SIGN_IN:
@@ -193,4 +198,5 @@ module.exports = {
   isActiveState,
   isPlainObject,
   validateRendererPayload,
+  validateMicrophoneSelection,
 };

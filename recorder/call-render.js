@@ -36,7 +36,16 @@ function renderCall(helperPath, sessionDir, { signal, spawnProcess = spawn } = {
     child.once('close', code => {
       if (aborted) finish(new CallError('cancelled', 'Processing paused.'));
       else if (timedOut) finish(new CallError('render-timeout', 'Audio preparation took too long. Retry it.'));
-      else if (code !== 0) finish(new CallError('render-failed', 'Audio preparation failed. Original audio is safe.'));
+      else if (code !== 0) {
+        const failures = {
+          20: ['render-validation', 'Audio preparation rejected the recording metadata or source integrity.'],
+          21: ['render-permission', 'Audio preparation could not access the recording files.'],
+          22: ['render-io', 'Audio preparation could not read or write a recording file.'],
+          23: ['render-internal', 'Audio preparation encountered an unexpected helper error.'],
+        };
+        const [kind, message] = failures[code] || ['render-failed', 'Audio preparation failed.'];
+        finish(new CallError(kind, `${message} Original audio is safe.`));
+      }
       else finish();
     });
   });
