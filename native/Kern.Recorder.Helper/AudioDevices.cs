@@ -108,6 +108,8 @@ internal sealed class AudioDevices : IDisposable
         return ids;
     }
 
+    public MMDevice OpenDevice(string endpointId) => enumerator.GetDevice(endpointId);
+
     public HashSet<string> ActiveRenderIds() => ActiveEndpointIds(DataFlow.Render);
 
     public HashSet<string> ActiveCaptureIds() => ActiveEndpointIds(DataFlow.Capture);

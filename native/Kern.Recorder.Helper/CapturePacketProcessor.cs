@@ -13,6 +13,9 @@ internal sealed class CapturePacketProcessor : IDisposable
     private readonly TimelineClock clock;
     private readonly Action<SegmentManifest> onSegmentFinalised;
     private readonly Action<Exception, long> onFailure;
+    private readonly Action<long>? onPacketOmitted;
+    private long omittedFrames;
+    public long OmittedFrames => Interlocked.Read(ref omittedFrames);
     private readonly Func<SegmentWriterOptions, ISegmentWriter> createWriter;
     private readonly Channel<object> workItems;
     private readonly Task writerTask;
@@ -23,7 +26,7 @@ internal sealed class CapturePacketProcessor : IDisposable
     private int nextSequence;
     private long pendingFrames;
     private long lastWriteTicks;
-    private bool writerFailed;
+    private volatile bool writerFailed;
     private bool disposed;
     private readonly PacketTimeline timeline;
 
@@ -36,7 +39,8 @@ internal sealed class CapturePacketProcessor : IDisposable
         TimelineClock clock,
         Action<SegmentManifest> onSegmentFinalised,
         Action<Exception, long> onFailure,
-        Func<SegmentWriterOptions, ISegmentWriter>? createWriter = null)
+        Func<SegmentWriterOptions, ISegmentWriter>? createWriter = null,
+        Action<long>? onPacketOmitted = null)
     {
         this.sessionPath = sessionPath;
         this.trackId = trackId;
@@ -45,6 +49,7 @@ internal sealed class CapturePacketProcessor : IDisposable
         this.clock = clock;
         this.onSegmentFinalised = onSegmentFinalised;
         this.onFailure = onFailure;
+        this.onPacketOmitted = onPacketOmitted;
         this.createWriter = createWriter ?? (options => new SegmentWriter(options));
         targetFrames = Math.Max(1L, (long)format.SampleRate * segmentDurationMs / 1000);
         workItems = Channel.CreateBounded<object>(new BoundedChannelOptions(queueCapacity)
@@ -72,9 +77,12 @@ internal sealed class CapturePacketProcessor : IDisposable
         if (!enqueueGate.Wait(0)) return false;
         try
         {
-            if (!workItems.Writer.TryWrite(packet)) return false;
-            lock (gate) pendingFrames += packet.FrameCount(format.BlockAlign);
-            return true;
+            lock (gate)
+            {
+                if (!workItems.Writer.TryWrite(packet)) return false;
+                pendingFrames += packet.FrameCount(format.BlockAlign);
+                return true;
+            }
         }
         finally { enqueueGate.Release(); }
     }
@@ -126,8 +134,18 @@ internal sealed class CapturePacketProcessor : IDisposable
             {
                 ProcessPacket(pendingPacket);
                 RemovePending(pendingPacket);
+                pendingPacket = null;
             }
             pendingPacket = timeline.Map(packet, packet.FrameCount(format.BlockAlign));
+            if (pendingPacket is null)
+            {
+                // Publish the valid run before recording a nonfatal timing omission.
+                if (writer is not null) FinaliseWriter(writer.TimelineEndTicks);
+                RemovePending(packet);
+                var frames = packet.FrameCount(format.BlockAlign);
+                Interlocked.Add(ref omittedFrames, frames);
+                onPacketOmitted?.Invoke(frames);
+            }
         }
         catch (Exception error)
         {
@@ -298,7 +316,8 @@ internal sealed record AudioPacket(
     long ContinuityId = 0,
     long? OriginalStartTicks = null,
     bool StartsNewRun = false,
-    long? ObservedAtTicks = null)
+    long? ObservedAtTicks = null,
+    long? MinimumStartTicks = null)
 {
     public int FrameCount(int blockAlign) => Data.Length / blockAlign;
 }

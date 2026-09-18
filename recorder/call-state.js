@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
-const { readJson, writeJson } = require('./atomic-json');
+const { readJson, writeJsonWithRetry } = require('./atomic-json');
 const { callDirectory, safePath, jsonFile, CallError } = require('./call-files');
 
 const JOB_FILE = 'processing.json';
@@ -29,7 +29,10 @@ function validState(value, id) {
   return value;
 }
 class CallState {
-  constructor(root, settingsPath) { this.root = root; this.settingsPath = settingsPath; }
+  constructor(root, settingsPath) {
+    this.root = root; this.settingsPath = settingsPath;
+    this.preferenceWrite = Promise.resolve();
+  }
   async directory(id) { return callDirectory(this.root, id); }
   async load(id) {
     const dir = await this.directory(id);
@@ -39,7 +42,7 @@ class CallState {
   async save(value) {
     const dir = await this.directory(value.sessionId);
     const file = await safePath(dir, JOB_FILE, true);
-    await writeJson(file, value);
+    await writeJsonWithRetry(file, value);
   }
   async preference() {
     try {
@@ -52,7 +55,10 @@ class CallState {
   }
   async setPreference(enabled) {
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be boolean');
-    await writeJson(this.settingsPath, { version: 1, cloudTranscription: enabled });
+    const write = this.preferenceWrite.catch(() => {}).then(() =>
+      writeJsonWithRetry(this.settingsPath, { version: 1, cloudTranscription: enabled }));
+    this.preferenceWrite = write;
+    await write;
     return { enabled };
   }
   async pending() {

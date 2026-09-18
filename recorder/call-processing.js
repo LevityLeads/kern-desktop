@@ -15,6 +15,8 @@ class CallProcessing extends EventEmitter {
     this.http = new CallHttp({ getSession, getOrigin });
     this.helperPath = helperPath;
     this.spawnProcess = spawnProcess;
+    // UI-only failure snapshots. Never consumed by processing or upload paths.
+    this.failures = new Map();
     this.locks = new Map();
     this.queue = new Set();
     this.timers = new Map();
@@ -44,8 +46,28 @@ class CallProcessing extends EventEmitter {
     finally { if (this.locks.get(id) === current) this.locks.delete(id); }
   }
   async save(state) {
-    await this.store.save(state);
+    try { await this.store.save(state); }
+    catch (error) {
+      error.processingStage = 'save-processing-state';
+      this.rememberFailure(state.sessionId, error, 'save-processing-state');
+      throw error;
+    }
+    this.failures.delete(state.sessionId);
     this.emit('change', { sessionId: state.sessionId });
+  }
+  failureDetails(error, stage) {
+    const errorCode = error instanceof CallError ? error.code
+      : ['ENOENT', 'EACCES', 'EPERM', 'EBUSY', 'ENOSPC', 'EIO'].includes(error.code) ? error.code : 'unexpected-error';
+    const processingStage = error.processingStage || stage || 'unknown-stage';
+    const errorOperation = typeof error.syscall === 'string' && /^[a-z][a-z0-9_]{0,31}$/i.test(error.syscall)
+      ? error.syscall : null;
+    return { processingStage, errorCode, errorOperation,
+      error: error instanceof CallError ? error.message
+        : `Call processing failed at ${processingStage} (${errorCode}${errorOperation ? `: ${errorOperation}` : ''}). Existing recording files were not deleted.` };
+  }
+  rememberFailure(id, error, stage) {
+    this.failures.set(id, { state: 'failed', progress: 0, ...this.failureDetails(error, stage) });
+    this.emit('change', { sessionId: id });
   }
   getTranscriptionEnabled() { return this.store.preference(); }
   setTranscriptionEnabled(enabled) { return this.store.setPreference(enabled); }
@@ -111,7 +133,13 @@ class CallProcessing extends EventEmitter {
     return this.getCall(id);
   }
   async getCall(id) {
-    const state = await this.store.load(id);
+    let state;
+    try { state = await this.store.load(id); }
+    catch (error) {
+      if (!this.failures.has(id)) throw error;
+      state = {};
+    }
+    state = { ...state, ...this.failures.get(id) };
     let playbackUrl = null;
     // Do not hash an entire call on every status tick. Only explicit playback/export resolves it.
     if (state.playbackReady) {
@@ -124,6 +152,7 @@ class CallProcessing extends EventEmitter {
     }
     return { state: state.state, progress: state.progress || 0, error: state.error || null,
       processingStage: state.processingStage || null, errorCode: state.errorCode || null,
+      errorOperation: state.errorOperation || null,
       playbackUrl, transcript: state.transcript || null, warnings: state.warnings || [] };
   }
   async getPlaybackFile(id) {
@@ -160,11 +189,9 @@ class CallProcessing extends EventEmitter {
           state = await this.store.load(id);
           await processCall(this, state);
         } catch (error) {
-          if (!state || this.closed || error.code === 'cancelled') return;
-          state.errorCode = error instanceof CallError ? error.code
-            : ['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO'].includes(error.code) ? error.code : 'unexpected-error';
-          state.error = error instanceof CallError ? error.message
-            : `Call processing failed at ${state.processingStage || 'unknown-stage'} (${state.errorCode}). Original audio is safe.`;
+          if (this.closed || error.code === 'cancelled') return;
+          if (!state) { this.rememberFailure(id, error, 'load-processing-state'); return; }
+          Object.assign(state, this.failureDetails(error, state.processingStage));
           if (error.code === 'auth') { state.state = 'sign-in-required'; state.cloudHold = true; }
           else if (error.retry && state.retryCount < 8) {
             state.state = 'retrying'; state.retryCount += 1;
@@ -172,7 +199,11 @@ class CallProcessing extends EventEmitter {
             this.schedule(id, state.nextAttemptAt - Date.now());
           } else state.state = 'failed';
           // Disk errors do not become an unhandled rejection or trigger upload without durable consent.
-          await this.save(state).catch(() => { this.emit('change', { sessionId: id }); });
+          await this.save(state).catch(() => {
+            // Preserve the primary failure even if persisting that failure fails.
+            this.failures.set(id, { state: state.state, progress: 0, ...this.failureDetails(error, state.processingStage) });
+            this.emit('change', { sessionId: id });
+          });
         }
       });
     }

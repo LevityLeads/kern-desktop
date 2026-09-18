@@ -10,6 +10,7 @@ const {
   globalShortcut,
   powerMonitor,
   powerSaveBlocker,
+  Notification,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
@@ -644,10 +645,16 @@ function setupRecorder() {
   // The renderer polls getCall; a change event refreshes the tray/updater promptly.
   callProcessing.on('change', () => updateTrayMenu());
   callProcessing.start().catch((error) => console.error('Call processing resume failed:', error.message));
+  const { CaptureHealthAlerts, presentCaptureAlert } = require('./recorder/capture-health-alerts');
+  const healthAlerts = new CaptureHealthAlerts();
   recorderSupervisor.on('status', (status) => {
     updateGuard?.captureStateChanged();
     updateTrayMenu();
     handleCaptureLifecycle(status);
+    presentCaptureAlert(healthAlerts.update(status), {
+      showRecorder, Notification,
+      reportError: error => console.error('Recorder health alert failed:', error.message),
+    });
   });
 
   // Ctrl+Shift+R is the browser/Kern hard-refresh; use Ctrl+Alt+R so we never steal it.

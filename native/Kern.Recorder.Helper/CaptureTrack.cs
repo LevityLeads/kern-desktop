@@ -4,7 +4,7 @@ using NAudio.Wave;
 
 namespace Kern.Recorder.Helper;
 
-internal sealed class CaptureTrack : IDisposable
+internal sealed class CaptureTrack : ICaptureTrack
 {
     private const int CaptureQueueCapacity = 32;
     private readonly object gate = new();
@@ -12,7 +12,7 @@ internal sealed class CaptureTrack : IDisposable
     private readonly TimelineClock clock;
     private readonly int segmentDurationMs;
     private readonly Action<SegmentManifest> onSegmentFinalised;
-    private readonly Action<CaptureTrack, Exception> onFailure;
+    private readonly Action<ICaptureTrack, Exception> onFailure;
     private readonly CaptureFence fence;
     private readonly MMDevice device;
     private readonly WasapiRecorder recorder;
@@ -23,8 +23,8 @@ internal sealed class CaptureTrack : IDisposable
     private bool persist = true;
     private bool disposed;
     private bool retired;
-    private bool dataLossDetected;
-    private bool writerFailed;
+    private string? historicalLoss;
+    private volatile bool writerFailed;
     private long sampleCount;
     private long droppedFrames;
     private long lastHeartbeatTicks;
@@ -44,7 +44,7 @@ internal sealed class CaptureTrack : IDisposable
         CaptureFence fence,
         IReadOnlyList<string> defaultRoles,
         Action<SegmentManifest> onSegmentFinalised,
-        Action<CaptureTrack, Exception> onFailure)
+        Action<ICaptureTrack, Exception> onFailure)
     {
         this.sessionPath = sessionPath;
         this.clock = clock;
@@ -75,7 +75,8 @@ internal sealed class CaptureTrack : IDisposable
             CaptureQueueCapacity,
             clock,
             onSegmentFinalised,
-            RecordWriterFailure);
+            RecordWriterFailure,
+            onPacketOmitted: RecordTimingOmission);
         recorder.DataAvailable += OnDataAvailable;
         recorder.RecordingStopped += OnRecordingStopped;
     }
@@ -89,6 +90,7 @@ internal sealed class CaptureTrack : IDisposable
     public long Generation => generation;
     public bool IsRetired => retired;
     public bool IsCapturing => !retired && recorder.CaptureState == CaptureState.Capturing;
+    public bool HasWriterFailure => writerFailed;
 
     public TrackManifest ToManifest() => new()
     {
@@ -111,7 +113,7 @@ internal sealed class CaptureTrack : IDisposable
             health = "healthy-idle";
             lastHeartbeatTicks = clock.NowTicks;
             minimumPersistenceTicks = lastHeartbeatTicks;
-            persist = true;
+            persist = fence.PersistAll && (Kind != "microphone" || fence.PersistMicrophone);
         }
         recorder.StartRecording();
     }
@@ -130,7 +132,7 @@ internal sealed class CaptureTrack : IDisposable
             lock (gate)
             {
                 generation = fence.Generation;
-                if (!dataLossDetected && !writerFailed) health = "healthy-idle";
+                if (!writerFailed) health = "healthy-idle";
                 message ??= "Paused by Kern.";
                 peak = 0;
             }
@@ -146,8 +148,8 @@ internal sealed class CaptureTrack : IDisposable
             persistenceEpoch++;
             minimumPersistenceTicks = cutoffTicks;
             persist = true;
-            if (!dataLossDetected && !writerFailed) health = "healthy-idle";
-            if (!dataLossDetected && !writerFailed) message = null;
+            if (!writerFailed) health = "healthy-idle";
+            if (!writerFailed) message = null;
             lastHeartbeatTicks = clock.NowTicks;
         }
     }
@@ -172,8 +174,8 @@ internal sealed class CaptureTrack : IDisposable
             lock (gate)
             {
                 if (!enabled) generation = fence.Generation;
-                if (!dataLossDetected && !writerFailed) health = "healthy-idle";
-                if (!dataLossDetected && !writerFailed) message = enabled ? null : reason;
+                if (!writerFailed) health = "healthy-idle";
+                if (!writerFailed) message = enabled ? null : reason;
                 if (!enabled) peak = 0;
             }
         }
@@ -198,7 +200,8 @@ internal sealed class CaptureTrack : IDisposable
             }
 
             recorder.DataAvailable -= OnDataAvailable;
-            if (recorder.CaptureState != CaptureState.Stopped) recorder.StopRecording();
+            try { if (recorder.CaptureState != CaptureState.Stopped) recorder.StopRecording(); }
+            catch { /* Device invalidation can reject StopRecording; the detached callback is already fenced. */ }
             FlushAtFence(cutoffTicks, endingEpoch);
             lock (gate)
             {
@@ -215,14 +218,14 @@ internal sealed class CaptureTrack : IDisposable
         lock (gate)
         {
             var currentHealth = health;
-            var currentMessage = message;
-            if (persist && packetProcessor.PendingFrames > 0 &&
+            var currentMessage = message ?? historicalLoss;
+            if (!retired && persist && packetProcessor.PendingFrames > 0 &&
                 nowTicks - Math.Max(packetProcessor.LastWriteTicks, lastHeartbeatTicks) > TimelineClock.Frequency * 2)
             {
                 currentHealth = "failed";
                 currentMessage = "Local audio writes have stalled.";
             }
-            else if (recorder.CaptureState == CaptureState.Capturing &&
+            else if (!retired && recorder.CaptureState == CaptureState.Capturing &&
                 nowTicks - lastHeartbeatTicks > TimelineClock.Frequency * 2)
             {
                 currentHealth = Kind == "render" ? "healthy-idle" : "unknown";
@@ -232,7 +235,7 @@ internal sealed class CaptureTrack : IDisposable
             }
             return new TrackStatus(
                 TrackId, Name, Kind, currentHealth, peak, sampleCount, droppedFrames,
-                lastHeartbeatTicks, packetProcessor.LastWriteTicks, DefaultRoles, currentMessage);
+                lastHeartbeatTicks, packetProcessor.LastWriteTicks, DefaultRoles, currentMessage, retired);
         }
     }
 
@@ -263,18 +266,26 @@ internal sealed class CaptureTrack : IDisposable
                 persist = fence.PersistAll && (Kind != "microphone" || fence.PersistMicrophone);
                 var callbackTicks = clock.NowTicks;
                 lastHeartbeatTicks = callbackTicks;
+                // A fatal storage failure must stay visible until the engine retires
+                // this track, even if additional WASAPI callbacks arrive first.
+                if (writerFailed) return;
                 var frames = buffer.Length / Format.BlockAlign;
                 var alignedBytes = frames * Format.BlockAlign;
                 if (alignedBytes != buffer.Length)
                 {
-                    dataLossDetected = true;
-                    health = "failed";
-                    message = "Capture endpoint emitted a malformed audio packet.";
+                    droppedFrames += frames;
+                    historicalLoss = "Some audio was omitted: endpoint emitted a malformed packet.";
+                    health = "unknown";
+                    message = historicalLoss;
+                    continuityId++;
+                    expectedDevicePosition = null;
+                    return;
                 }
                 // A TimestampError invalidates BOTH of WASAPI's position outputs, so a
                 // device position reported alongside it must not be compared, advanced,
                 // or persisted. Treat the running position as unknown for this packet.
-                var positionTrusted = !flags.HasFlag(AudioClientBufferFlags.TimestampError);
+                var positionTrusted = !flags.HasFlag(AudioClientBufferFlags.TimestampError) &&
+                    devicePosition >= 0 && devicePosition <= long.MaxValue - frames;
                 var discontinuity = flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity);
                 if (!positionTrusted || discontinuity) continuityId++;
                 if (discontinuity)
@@ -284,36 +295,38 @@ internal sealed class CaptureTrack : IDisposable
                     if (positionTrusted && expectedDevicePosition is long expected && devicePosition > expected)
                     {
                         droppedFrames += devicePosition - expected;
-                        dataLossDetected = true;
-                        health = "failed";
-                        message = "Capture endpoint skipped audio frames.";
+                        historicalLoss = "Some audio is missing: endpoint skipped audio frames.";
+                        message = historicalLoss;
                     }
                     else
                     {
                         message = "Capture endpoint reported a timing discontinuity; a new audio run was started.";
                     }
                 }
-                expectedDevicePosition = positionTrusted ? checked(devicePosition + frames) : null;
+                expectedDevicePosition = positionTrusted ? devicePosition + frames : null;
                 sampleCount += frames;
 
                 if (!persist || frames == 0)
                 {
                     peak = 0;
-                    if (!dataLossDetected && !writerFailed) health = "healthy-idle";
+                    if (!writerFailed) health = "healthy-idle";
                     return;
                 }
 
-                var hasValidTimestamp = qpcPosition > 0 && !flags.HasFlag(AudioClientBufferFlags.TimestampError);
-                if (!hasValidTimestamp)
+                var hasValidTimestamp = positionTrusted && qpcPosition > 0;
+                long packetStart;
+                try
+                {
+                    if (!hasValidTimestamp) throw new ArgumentOutOfRangeException(nameof(qpcPosition));
+                    packetStart = clock.FromQpc100Nanoseconds(qpcPosition);
+                }
+                catch (Exception error) when (error is OverflowException or ArgumentOutOfRangeException)
                 {
                     continuityId++;
-                    droppedFrames += frames;
-                    dataLossDetected = true;
-                    health = "failed";
-                    message = "Audio packet omitted because its capture timestamp was unavailable.";
+                    expectedDevicePosition = null;
+                    RecordTimingOmission(frames);
                     return;
                 }
-                var packetStart = clock.FromQpc100Nanoseconds(qpcPosition);
                 var skipFrames = FramesStrictlyBefore(
                     packetStart,
                     minimumPersistenceTicks,
@@ -331,7 +344,7 @@ internal sealed class CaptureTrack : IDisposable
                 }
 
                 peak = flags.HasFlag(AudioClientBufferFlags.Silent) ? 0 : PeakMeter.Measure(buffer[..alignedBytes], Format);
-                if (!dataLossDetected && !writerFailed)
+                if (!writerFailed)
                 {
                     health = peak > 0.0001 ? "capturing-signal" : "acquired-silence";
                     if (!discontinuity) message = null;
@@ -350,7 +363,8 @@ internal sealed class CaptureTrack : IDisposable
                 copy = buffer[..alignedBytes].ToArray();
                 packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch,
                     PositionTrusted: positionTrusted && hasValidTimestamp, Discontinuity: discontinuity,
-                    ContinuityId: continuityId, ObservedAtTicks: callbackTicks);
+                    ContinuityId: continuityId, ObservedAtTicks: callbackTicks,
+                    MinimumStartTicks: minimumPersistenceTicks);
             }
 
             if (packet is not null && packetProcessor.TryEnqueue(packet)) return;
@@ -360,9 +374,10 @@ internal sealed class CaptureTrack : IDisposable
                 lock (gate)
                 {
                     droppedFrames += copy.Length / Format.BlockAlign;
-                    dataLossDetected = true;
-                    health = "failed";
-                    message = "Capture buffer overflowed because local audio writes were too slow.";
+                    historicalLoss = "Some audio is missing: capture buffer overflowed while writes were slow.";
+                    health = "unknown";
+                    message = historicalLoss;
+                    continuityId++;
                 }
             }
         }
@@ -384,6 +399,16 @@ internal sealed class CaptureTrack : IDisposable
     {
         if (writerFailed) return;
         packetProcessor.Flush(cutoffTicks, endingEpoch);
+    }
+
+    private void RecordTimingOmission(long frames)
+    {
+        lock (gate)
+        {
+            droppedFrames += frames;
+            historicalLoss = "Some audio was omitted because its timestamp was unavailable or inconsistent.";
+            if (!writerFailed) { health = "unknown"; message = historicalLoss; }
+        }
     }
 
     private void RecordWriterFailure(Exception error, long lostFrames)

@@ -4,9 +4,16 @@ namespace Kern.Recorder.Helper;
 
 internal sealed class TimelineClock
 {
-    private readonly long origin = Stopwatch.GetTimestamp();
+    private readonly Func<long> timestamp;
+    private readonly long origin;
 
-    public long NowTicks => Stopwatch.GetTimestamp() - origin;
+    public TimelineClock(Func<long>? timestamp = null)
+    {
+        this.timestamp = timestamp ?? Stopwatch.GetTimestamp;
+        origin = this.timestamp();
+    }
+
+    public long NowTicks => timestamp() - origin;
     public static long Frequency => Stopwatch.Frequency;
     public long FromQpc100Nanoseconds(long qpcPosition) =>
         checked(Scale(qpcPosition, Frequency, 10_000_000L) - origin);

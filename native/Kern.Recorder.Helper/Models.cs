@@ -129,7 +129,8 @@ internal sealed record TrackStatus(
     long LastHeartbeatTicks,
     long LastWriteTicks,
     IReadOnlyList<string> DefaultRoles,
-    string? Message);
+    string? Message,
+    bool Retired = false);
 
 internal sealed record RecorderStatus(
     string State,

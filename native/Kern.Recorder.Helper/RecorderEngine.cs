@@ -1,18 +1,15 @@
-using NAudio.CoreAudioApi;
-
 namespace Kern.Recorder.Helper;
 
-internal sealed class RecorderEngine : IDisposable
+internal sealed partial class RecorderEngine : IDisposable
 {
     private const long MinimumFreeBytes = 256L * 1024 * 1024;
     private const long MetadataReserveBytes = 64L * 1024 * 1024;
     private readonly object gate = new();
-    private readonly AudioDevices devices;
+    private readonly ICaptureBackend devices;
     private readonly TimelineClock clock;
     private readonly CaptureFence fence = new();
     private readonly Func<string, long> availableFreeSpace;
-    private readonly List<CaptureTrack> tracks = [];
-    private readonly SemaphoreSlim reconcileGate = new(1, 1);
+    private readonly List<ICaptureTrack> tracks = [];
     private SessionStore? store;
     private CancellationTokenSource? sessionCancellation;
     private Task? healthTask;
@@ -29,6 +26,9 @@ internal sealed class RecorderEngine : IDisposable
     private long sessionOriginTicks;
 
     public RecorderEngine(AudioDevices devices, TimelineClock clock, Func<string, long>? availableFreeSpace = null)
+        : this(new WasapiCaptureBackend(devices), clock, availableFreeSpace) { }
+
+    internal RecorderEngine(ICaptureBackend devices, TimelineClock clock, Func<string, long>? availableFreeSpace = null)
     {
         this.devices = devices;
         this.clock = clock;
@@ -72,12 +72,14 @@ internal sealed class RecorderEngine : IDisposable
 
             try
             {
-                foreach (var renderDevice in devices.DefaultRenderDevices())
-                    AddTrack(renderDevice, "render", request.SegmentDurationMs);
-                AddTrack(devices.ResolveMicrophone(request.Microphone), "microphone", request.SegmentDurationMs);
+                pinnedMicrophoneId = devices.ResolveMicrophoneId(request.Microphone);
+                foreach (var endpointId in devices.DefaultRenderIds())
+                    AddTrack(endpointId, "render", request.SegmentDurationMs);
+                AddTrack(pinnedMicrophoneId, "microphone", request.SegmentDurationMs);
                 if (tracks.Count == 0) throw new ProtocolException("no-audio-devices", "No supported audio endpoint is available.");
 
-                foreach (var track in tracks) track.Start();
+                foreach (var track in tracks.Where(track => !track.IsRetired)) track.Start();
+                devicesChanged = true;
                 state = "recording";
                 store.SetState(state, 0, micMuted, fence.Generation);
                 healthTask = Task.Run(() => HealthLoop(sessionCancellation.Token));
@@ -93,7 +95,7 @@ internal sealed class RecorderEngine : IDisposable
                     fence.Generation++;
                 }
                 var cutoff = clock.NowTicks;
-                foreach (var track in tracks)
+                foreach (var track in tracks.Where(track => !track.IsRetired))
                 {
                     try { track.Stop(cutoff); }
                     catch { }
@@ -118,7 +120,7 @@ internal sealed class RecorderEngine : IDisposable
             var cutoff = clock.NowTicks;
             fence.PersistAll = false;
             fence.Generation++;
-            foreach (var track in tracks) track.PauseAtFence(cutoff);
+            foreach (var track in tracks.Where(track => !track.IsRetired)) track.PauseAtFence(cutoff);
             pauseGapId = store!.OpenGap("all", "user-pause", cutoff, fence.Generation).GapId;
             state = "paused";
             PersistState(cutoff, request);
@@ -140,7 +142,7 @@ internal sealed class RecorderEngine : IDisposable
             pauseGapId = null;
             fence.Generation++;
             fence.PersistAll = true;
-            foreach (var track in tracks) track.ResumeAtFence(cutoff);
+            foreach (var track in tracks.Where(track => !track.IsRetired)) track.ResumeAtFence(cutoff);
             state = "recording";
             PersistState(cutoff, request);
             return PublishStatus(cutoff);
@@ -161,7 +163,7 @@ internal sealed class RecorderEngine : IDisposable
             fence.Generation++;
             fence.PersistMicrophone = !muted;
             micMuted = muted;
-            foreach (var track in tracks.Where(track => track.Kind == "microphone"))
+            foreach (var track in tracks.Where(track => !track.IsRetired && track.Kind == "microphone"))
                 track.ApplyMicrophoneFence(!muted, cutoff, "Kern microphone is muted.");
             if (muted)
                 muteGapId = store!.OpenGap("microphone", "user-mic-mute", cutoff, fence.Generation).GapId;
@@ -188,7 +190,7 @@ internal sealed class RecorderEngine : IDisposable
             {
                 fence.PersistAll = false;
                 fence.Generation++;
-                foreach (var track in tracks) track.PauseAtFence(cutoff);
+                foreach (var track in tracks.Where(track => !track.IsRetired)) track.PauseAtFence(cutoff);
                 pauseGapId = store!.OpenGap("all", "system-suspend", cutoff, fence.Generation).GapId;
             }
             state = "suspended";
@@ -211,7 +213,7 @@ internal sealed class RecorderEngine : IDisposable
                 cutoff = clock.NowTicks;
                 fence.PersistAll = false;
                 fence.Generation++;
-                foreach (var track in tracks)
+                foreach (var track in tracks.Where(track => !track.IsRetired))
                 {
                     try { track.Stop(cutoff); }
                     catch (Exception error)
@@ -223,6 +225,7 @@ internal sealed class RecorderEngine : IDisposable
             }
             if (pauseGapId is not null) store!.CloseGap(pauseGapId, cutoff);
             if (muteGapId is not null) store!.CloseGap(muteGapId, cutoff);
+            CloseRecoveryGaps(cutoff);
             PersistState(cutoff, request);
             sessionCancellation?.Cancel();
             var result = PublishStatus(cutoff);
@@ -262,38 +265,24 @@ internal sealed class RecorderEngine : IDisposable
             TimelineClock.ElapsedMilliseconds(sessionOriginTicks, now),
             freeBytes,
             tracks.Select(track => track.Status(now)).ToList(),
-            failure);
+            failure,
+            state == "recording" && (tracks.Any(t => t.IsRetired) || tracks.Any(t => t.Status(now).DroppedFrames > 0))
+                ? "Recording continues. Some earlier audio is missing."
+                : null);
     }
 
-    private void AddTrack(MMDevice device, string kind, int segmentDurationMs)
+    private ICaptureTrack AddTrack(string endpointId, string kind, int segmentDurationMs)
     {
-        if (tracks.Any(track => track.EndpointId == device.ID && track.Kind == kind && track.IsCapturing))
-        {
-            device.Dispose();
-            return;
-        }
-        CaptureTrack? track = null;
+        var track = devices.CreateTrack(endpointId, kind,
+            store is null ? throw new InvalidOperationException("Session store is unavailable.") : store.SessionPath,
+            clock, segmentDurationMs, fence, segment => store.AddSegment(segment), OnTrackFailure);
         try
         {
-            track = new CaptureTrack(
-                device,
-                kind,
-                store is null ? throw new InvalidOperationException("Session store is unavailable.") : store.SessionPath,
-                clock,
-                segmentDurationMs,
-                fence,
-                devices.DefaultRoles(device.ID, device.DataFlow),
-                segment => store.AddSegment(segment),
-                OnTrackFailure);
-            tracks.Add(track);
             store.AddTrack(track.ToManifest());
+            tracks.Add(track);
+            return track;
         }
-        catch
-        {
-            track?.Dispose();
-            if (track is null) device.Dispose();
-            throw;
-        }
+        catch { track.Dispose(); throw; }
     }
 
     private async Task HealthLoop(CancellationToken cancellationToken)
@@ -303,6 +292,7 @@ internal sealed class RecorderEngine : IDisposable
         {
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
+                CheckRecovery();
                 RecorderStatus status;
                 lock (gate)
                 {
@@ -313,13 +303,13 @@ internal sealed class RecorderEngine : IDisposable
                         _ = Task.Run(StopForLowStorage, CancellationToken.None);
                         return;
                     }
-                    if (status.Tracks.Any(track => track.Health is "failed" or "unknown") && state == "recording")
+                    if (HasActiveCaptureFailure(clock.NowTicks) && state == "recording")
                     {
                         state = "degraded";
                         PersistState();
                         status = SnapshotUnsafe();
                     }
-                    else if (state == "degraded" && status.Tracks.All(track => track.Health is not "failed" and not "unknown"))
+                    else if (state == "degraded" && !HasActiveCaptureFailure(clock.NowTicks))
                     {
                         state = "recording";
                         failure = null;
@@ -331,61 +321,17 @@ internal sealed class RecorderEngine : IDisposable
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-    }
-
-    private void OnDevicesChanged(object? sender, EventArgs eventArgs) => _ = ReconcileDevicesAsync();
-
-    private async Task ReconcileDevicesAsync()
-    {
-        if (!await reconcileGate.WaitAsync(0).ConfigureAwait(false)) return;
-        try
+        catch (Exception error)
         {
+            // Disk/status persistence failure must not silently kill health supervision.
             lock (gate)
             {
                 if (state is "idle" or "stopped" or "interrupted") return;
-                var defaultRenderIds = devices.DefaultRenderIds();
-                var activeCaptureIds = devices.ActiveCaptureIds();
-                var cutoff = clock.NowTicks;
-                foreach (var track in tracks)
-                {
-                    track.UpdateDefaultRoles(devices.DefaultRoles(
-                        track.EndpointId,
-                        track.Kind == "render" ? DataFlow.Render : DataFlow.Capture));
-                    var endpointIsActive = track.Kind == "render"
-                        ? defaultRenderIds.Contains(track.EndpointId)
-                        : activeCaptureIds.Contains(track.EndpointId);
-                    if (!track.IsRetired && !endpointIsActive)
-                    {
-                        var message = track.Kind == "render"
-                            ? "Playback endpoint is no longer active."
-                            : "Pinned microphone is no longer active.";
-                        track.RetireEndpoint(cutoff, message);
-                        store!.OpenGap(track.TrackId, "endpoint-unavailable", cutoff, fence.Generation, "measured");
-                    }
-                }
-
-                foreach (var device in devices.DefaultRenderDevices())
-                {
-                    try
-                    {
-                        if (tracks.All(track => track.EndpointId != device.ID || track.Kind != "render" || !track.IsCapturing))
-                        {
-                            AddTrack(device, "render", activeSegmentDurationMs);
-                            tracks[^1].Start();
-                        }
-                        else device.Dispose();
-                    }
-                    catch (Exception error)
-                    {
-                        device.Dispose();
-                        failure = new { code = "endpoint-add-failed", message = error.Message };
-                    }
-                }
-                PersistState();
+                state = "degraded";
+                failure = new { code = "capture-health-failed", message = error.Message };
                 StatusChanged?.Invoke(this, SnapshotUnsafe());
             }
         }
-        finally { reconcileGate.Release(); }
     }
 
     private void StopForLowStorage()
@@ -418,16 +364,6 @@ internal sealed class RecorderEngine : IDisposable
         }
     }
 
-    private void OnTrackFailure(CaptureTrack track, Exception error)
-    {
-        lock (gate)
-        {
-            state = "degraded";
-            failure = new { code = "track-failed", trackId = track.TrackId, message = error.Message };
-            PersistState();
-            StatusChanged?.Invoke(this, SnapshotUnsafe());
-        }
-    }
 
     private static void ValidateStart(StartRequest request)
     {
@@ -501,7 +437,7 @@ internal sealed class RecorderEngine : IDisposable
 
     private void DisposeTracks()
     {
-        foreach (var track in tracks) track.Dispose();
+        foreach (var track in tracks.Where(track => !track.IsRetired)) track.Dispose();
         tracks.Clear();
     }
 
@@ -523,7 +459,6 @@ internal sealed class RecorderEngine : IDisposable
         catch { }
         DisposeTracks();
         devices.Changed -= OnDevicesChanged;
-        reconcileGate.Dispose();
         sessionCancellation?.Dispose();
     }
 }

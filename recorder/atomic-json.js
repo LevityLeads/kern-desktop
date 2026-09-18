@@ -40,6 +40,7 @@ function writeJson(file, value) {
   const temporary = path.join(path.dirname(file), `.kern-${randomUUID()}.tmp`);
   let fd;
   let owned = false;
+  let failure;
   try {
     fd = fs.openSync(temporary, 'wx', 0o600);
     owned = true;
@@ -50,10 +51,29 @@ function writeJson(file, value) {
     regularFile(file);
     fs.renameSync(temporary, file);
     owned = false;
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-    if (owned) fs.unlinkSync(temporary);
+    let cleanupError;
+    try { if (fd !== undefined) fs.closeSync(fd); } catch (error) { cleanupError = error; }
+    try { if (owned) fs.unlinkSync(temporary); } catch (error) { cleanupError ||= error; }
+    if (!failure && cleanupError) throw cleanupError;
   }
 }
 
-module.exports = { readJson, writeJson };
+// Retry only failed replacement operations. Each attempt revalidates the target
+// and stages a new exclusive temp file; the previous state is never deleted.
+async function writeJsonWithRetry(file, value, { delays = [25, 75, 150, 300],
+  wait = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  const snapshot = JSON.parse(JSON.stringify(value));
+  for (let attempt = 0; ; attempt++) {
+    try { writeJson(file, snapshot); return; }
+    catch (error) {
+      if (error.syscall !== 'rename' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= delays.length) throw error;
+      await wait(delays[attempt]);
+    }
+  }
+}
+
+module.exports = { readJson, writeJson, writeJsonWithRetry };

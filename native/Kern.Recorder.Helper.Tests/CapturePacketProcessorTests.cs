@@ -177,9 +177,10 @@ public sealed class CapturePacketProcessorTests : IDisposable
         Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(960), 1, 1)
             with { DevicePosition = nextPosition, PositionTrusted = trusted, Discontinuity = discontinuity }));
         processor.Flush(FrameTicks(1440), 1);
-        Assert.Equal(2, segments.Count);
-        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
-        Assert.Equal(960, segments.Sum(s => s.SampleCount));
+        Assert.Equal(trusted ? 2 : 1, segments.Count);
+        if (trusted) Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
+        Assert.Equal(trusted ? 960 : 480, segments.Sum(s => s.SampleCount));
+        Assert.Equal(trusted ? 0 : 480, processor.OmittedFrames);
     }
 
     [Fact]
@@ -195,7 +196,10 @@ public sealed class CapturePacketProcessorTests : IDisposable
         Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(960), 1, 1)
             with { DevicePosition = 960, ObservedAtTicks = FrameTicks(1440) }));
         processor.Flush(FrameTicks(1440), 1);
-        Assert.IsType<InvalidDataException>(failure);
+        Assert.Null(failure);
+        Assert.Equal(480, processor.OmittedFrames);
+        Assert.Equal(960, segments.Sum(s => s.SampleCount));
+        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
         Assert.DoesNotContain(segments, segment => segment.SampleCount > 480);
     }
 
