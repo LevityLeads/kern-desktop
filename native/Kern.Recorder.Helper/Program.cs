@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace Kern.Recorder.Helper;
@@ -11,8 +12,24 @@ internal static class Program
         {
             if (args.Length > 0 && args[0] == "--render")
             {
+                if (args.Length == 4 && args[2] == "--through" && !string.IsNullOrWhiteSpace(args[1]))
+                {
+                    if (!long.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out var throughMs) || throughMs <= 0)
+                        throw new ArgumentException("Usage: --render <absolute-session-directory> --through <positive-milliseconds>");
+                    var live = CallRenderer.RenderThrough(args[1], throughMs);
+                    Console.WriteLine(JsonSerializer.Serialize(new
+                    {
+                        complete = live.Complete,
+                        sessionId = live.SessionId,
+                        throughSamples = live.ThroughSamples,
+                        windowCount = live.Windows.Count,
+                        manifestPath = "derived/live-manifest.json",
+                        peakPolicy = live.PeakPolicy,
+                    }, Protocol.JsonOptions));
+                    return 0;
+                }
                 if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
-                    throw new ArgumentException("Usage: --render <absolute-session-directory>");
+                    throw new ArgumentException("Usage: --render <absolute-session-directory> [--through <milliseconds>]");
                 var manifest = CallRenderer.Render(args[1]);
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {

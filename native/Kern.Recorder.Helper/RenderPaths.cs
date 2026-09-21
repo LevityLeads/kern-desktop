@@ -40,13 +40,15 @@ internal sealed partial class RenderPaths : IDisposable
         PinDirectory(path);
     }
 
-    public FileStream OpenRead(string relative)
+    // shared: permit concurrent writers and an atomic replace of the file while it is open. Used only
+    // for the source manifest of a session that is still recording; every other read denies writers.
+    public FileStream OpenRead(string relative, bool shared = false)
     {
         var path = Resolve(relative);
         FileStream stream;
         if (OperatingSystem.IsWindows())
         {
-            var handle = OpenDirectory(path, 0x80000000, 1, 0, 3, 0x00200000, 0);
+            var handle = OpenDirectory(path, 0x80000000, shared ? 7u : 1u, 0, 3, 0x00200000, 0);
             if (handle.IsInvalid)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -65,7 +67,8 @@ internal sealed partial class RenderPaths : IDisposable
             }
             catch { handle.Dispose(); throw; }
         }
-        else stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        else stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            shared ? FileShare.ReadWrite | FileShare.Delete : FileShare.Read);
         try { RejectLink(path); return stream; }
         catch { stream.Dispose(); throw; }
     }
@@ -76,9 +79,9 @@ internal sealed partial class RenderPaths : IDisposable
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    public byte[] ReadBytes(string relative, int maximum)
+    public byte[] ReadBytes(string relative, int maximum, bool shared = false)
     {
-        using var stream = OpenRead(relative);
+        using var stream = OpenRead(relative, shared);
         if (stream.Length > maximum) throw new InvalidDataException("Manifest exceeds render limit.");
         var bytes = new byte[checked((int)stream.Length)];
         stream.ReadExactly(bytes);

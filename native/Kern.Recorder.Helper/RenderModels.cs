@@ -12,9 +12,17 @@ internal sealed record RenderManifest(
     string SourceIntegrity, IReadOnlyList<string> Warnings, IReadOnlyList<RenderSource> Sources,
     string PeakPolicy, double SourcePeak, double Gain, RenderArtifact Audio,
     IReadOnlyList<RenderWindow> Windows, bool Complete);
+// Live render: only the windows already complete at ThroughSamples are published; nothing is finalised.
+internal sealed record RenderLiveManifest(
+    int Version, string RendererVersion, string SessionId, string SourceFingerprint, long ThroughSamples,
+    int SampleRate, int Channels, int BitsPerSample, string PeakPolicy,
+    IReadOnlyList<RenderWindow> Windows, bool Complete);
+internal sealed record RenderPolicyDocument(int Version, string PeakPolicy);
+internal enum RenderPeakPolicy { GlobalGain, Clamp }
 internal sealed record RenderInput(SegmentManifest Segment, TrackFormat Format, long StartSample, long SampleCount);
+// Live is true when SampleCount was truncated to a requested render point of an unfinished session.
 internal sealed record RenderPlan(SessionManifest Session, string Fingerprint, long SampleCount,
-    IReadOnlyList<RenderInput> Inputs, List<string> Warnings);
+    IReadOnlyList<RenderInput> Inputs, List<string> Warnings, bool Live = false);
 
 internal static class RenderConstants
 {
@@ -25,5 +33,6 @@ internal static class RenderConstants
     public const string Version = "kern-call-render-1";
     public const long MaxSamples = 12L * 60 * 60 * Rate;
     public const int MaxManifestBytes = 32 * 1024 * 1024;
+    public const int MaxPolicyBytes = 4 * 1024;
     public const long MaxSegmentBytes = 128L * 1024 * 1024;
 }

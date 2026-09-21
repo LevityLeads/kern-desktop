@@ -7,6 +7,7 @@ const { CallHttp } = require('./call-http');
 const { CallError, safePath, sourceManifest } = require('./call-files');
 const { validateDerived } = require('./call-derived');
 const { processCall } = require('./call-work');
+const { startLivePublisher } = require('./call-live');
 
 class CallProcessing extends EventEmitter {
   constructor({ recordingsRoot, helperPath, getSession, getOrigin, settingsPath, spawnProcess }) {
@@ -17,6 +18,8 @@ class CallProcessing extends EventEmitter {
     this.spawnProcess = spawnProcess;
     // UI-only failure snapshots. Never consumed by processing or upload paths.
     this.failures = new Map();
+    // Mid-call window publishers, one per recording call. Never exposed over IPC.
+    this.live = new Map();
     this.locks = new Map();
     this.queue = new Set();
     this.timers = new Map();
@@ -36,7 +39,16 @@ class CallProcessing extends EventEmitter {
     this.abort.abort();
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear(); this.queue.clear();
+    await this.stopLive();
     await this.running?.catch(() => {});
+  }
+  async stopLive(id = null) {
+    const ids = id === null ? [...this.live.keys()] : [id];
+    for (const key of ids) {
+      const publisher = this.live.get(key);
+      this.live.delete(key);
+      if (publisher) await publisher.stop();
+    }
   }
   async lock(id, action) {
     const previous = this.locks.get(id) || Promise.resolve();
@@ -87,9 +99,15 @@ class CallProcessing extends EventEmitter {
       catch { state.origin = null; }
       state.state = 'recording';
       await this.save(state);
+      // Consent was snapshotted at capture start, so live publishing follows the same decision.
+      if (state.consent && state.origin && !this.closed && !this.live.has(id)) {
+        this.live.set(id, startLivePublisher(this, id));
+      }
     });
   }
   async onStopped(id) {
+    // The live render holds derived/render.lock; it must be gone before the final render is queued.
+    await this.stopLive(id);
     await this.lock(id, async () => {
       const state = await this.store.load(id);
       state.preparePending = true;

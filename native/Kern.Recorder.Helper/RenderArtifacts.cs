@@ -5,17 +5,22 @@ namespace Kern.Recorder.Helper;
 
 internal static class RenderArtifacts
 {
-    public static List<RenderWindow> Windows(RenderPaths paths, long samples, Action<string>? trackTemporary = null,
-        IReadOnlyList<RenderWindow>? previous = null)
+    // Slices callFile ([0, samples) of 16k mono PCM) into published derived/window-NNNNNN.wav files.
+    // complete: the audio is the whole call, so the trailing partial window is emitted too. Otherwise
+    // only windows with a full second of audio beyond their end are cut, keeping any resampler tail at
+    // the truncation point away from a published file. An identical existing file is left untouched.
+    public static List<RenderWindow> Windows(RenderPaths paths, string callFile, long samples, bool complete,
+        Action<string>? trackTemporary = null, IReadOnlyList<RenderWindow>? previous = null)
     {
         var windows = new List<RenderWindow>();
         var buffer = new byte[64 * 1024];
-        using var call = paths.OpenRead("derived/call.wav");
+        using var call = paths.OpenRead(callFile);
         for (long core = 0; core < samples; core += RenderConstants.CoreSeconds * RenderConstants.Rate)
         {
             var coreEnd = Math.Min(samples, core + RenderConstants.CoreSeconds * RenderConstants.Rate);
             var start = Math.Max(0, core - RenderConstants.OverlapSeconds * RenderConstants.Rate);
             var end = Math.Min(samples, coreEnd + RenderConstants.OverlapSeconds * RenderConstants.Rate);
+            if (!complete && end + RenderConstants.Rate > samples) break;
             var id = $"window-{windows.Count:D6}";
             var relative = $"derived/{id}.wav";
             var temporary = $"derived/{id}.{Guid.NewGuid():N}.partial";
@@ -56,7 +61,25 @@ internal static class RenderArtifacts
         return new RenderArtifact(relative, stream.Length, RenderValidation.Hash(stream));
     }
 
-    public static RenderManifest? Cached(RenderPaths paths, RenderPlan plan)
+    // Windows already published for this session by an earlier render, live or final, or null. Used only
+    // to leave byte-identical files untouched; every candidate is re-hashed before being kept.
+    public static IReadOnlyList<RenderWindow>? PublishedWindows(RenderPaths paths)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<RenderManifest>(
+                paths.ReadBytes("derived/manifest.json", RenderConstants.MaxManifestBytes), Protocol.JsonOptions)?.Windows;
+        }
+        catch (Exception error) when (error is IOException or JsonException) { }
+        try
+        {
+            return JsonSerializer.Deserialize<RenderLiveManifest>(
+                paths.ReadBytes("derived/live-manifest.json", RenderConstants.MaxManifestBytes), Protocol.JsonOptions)?.Windows;
+        }
+        catch (Exception error) when (error is IOException or JsonException) { return null; }
+    }
+
+    public static RenderManifest? Cached(RenderPaths paths, RenderPlan plan, RenderPeakPolicy peakPolicy)
     {
         try
         {
@@ -65,6 +88,7 @@ internal static class RenderArtifacts
             if (manifest is null || !manifest.Complete || manifest.Version != 1 ||
                 manifest.RendererVersion != RenderConstants.Version || manifest.SourceFingerprint != plan.Fingerprint ||
                 manifest.SessionId != plan.Session.SessionId || manifest.SampleCount != plan.SampleCount ||
+                manifest.PeakPolicy != RenderPolicy.Describe(peakPolicy) ||
                 manifest.SampleRate != RenderConstants.Rate || manifest.Channels != 1 || manifest.BitsPerSample != 16 ||
                 manifest.DurationSeconds != Seconds(plan.SampleCount) || manifest.SourceIntegrity != "verified" ||
                 manifest.Audio.RelativePath != "derived/call.wav" || manifest.Sources.Count != plan.Inputs.Count ||

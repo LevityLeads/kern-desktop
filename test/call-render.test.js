@@ -24,6 +24,15 @@ test('render runs separately without shell, drains stderr and awaits close', asy
   process.emit('close', 0);
   await work;
 });
+test('render passes --through only for a positive integer millisecond bound', async () => {
+  const seen = [];
+  const spawnProcess = (file, args) => { seen.push(args); const process = child(); setImmediate(() => process.emit('close', 0)); return process; };
+  await renderCall('/helper', '/session', { spawnProcess, through: 133000 });
+  await renderCall('/helper', '/session', { spawnProcess });
+  for (const bad of [0, -5, 1.5, NaN, '133000', Infinity]) await renderCall('/helper', '/session', { spawnProcess, through: bad });
+  assert.deepEqual(seen[0], ['--render', '/session', '--through', '133000']);
+  for (const args of seen.slice(1)) assert.deepEqual(args, ['--render', '/session']);
+});
 test('render errors never expose native output or private paths', async () => {
   const process = child();
   const work = renderCall('/private/helper', '/private/session', { spawnProcess: () => process });

@@ -7,14 +7,22 @@ const { callDirectory, safePath, jsonFile, CallError } = require('./call-files')
 const JOB_FILE = 'processing.json';
 const RESUMABLE = new Set(['preparing', 'ready', 'uploading', 'transcribing', 'retrying']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MAX_LIVE_WINDOWS = 120;
+// Mid-call publishing progress. Absent in state files written before live publishing existed.
+const LIVE_DEFAULTS = { live: false, liveWindows: 0, liveError: null };
 function fresh(id) {
   return { version: 1, sessionId: id, state: 'local', progress: 0, error: null,
     consent: false, requested: false, preparePending: false, origin: null, ownerId: null, storageOrigin: null,
-    remoteId: null, fingerprint: null, uploaded: [], retryCount: 0, nextAttemptAt: 0, warnings: [] };
+    remoteId: null, fingerprint: null, uploaded: [], retryCount: 0, nextAttemptAt: 0, warnings: [], ...LIVE_DEFAULTS };
+}
+function validLive(value) {
+  return (value.live === undefined || typeof value.live === 'boolean') &&
+    (value.liveWindows === undefined || (Number.isSafeInteger(value.liveWindows) && value.liveWindows >= 0 && value.liveWindows <= MAX_LIVE_WINDOWS)) &&
+    (value.liveError === undefined || value.liveError === null || (typeof value.liveError === 'string' && value.liveError.length <= 200));
 }
 function validState(value, id) {
   if (!value || value.version !== 1 || value.sessionId !== id ||
-      typeof value.state !== 'string' || !Array.isArray(value.uploaded) ||
+      typeof value.state !== 'string' || !Array.isArray(value.uploaded) || !validLive(value) ||
       value.uploaded.length > 8192 || value.uploaded.some(u => typeof u !== 'string' || !/^[0-9a-f-]{36}$/.test(u)) ||
       (value.remoteId !== null && !UUID.test(value.remoteId)) ||
       (value.ownerId !== null && (typeof value.ownerId !== 'string' || value.ownerId.length > 128)) ||
@@ -26,6 +34,7 @@ function validState(value, id) {
       (value.uploadFinalized === true && (!Number.isSafeInteger(value.durationMs) || value.durationMs < 1 || value.durationMs > 7200000))) {
     throw new CallError('invalid-state', 'Local processing state is damaged.');
   }
+  for (const [key, fallback] of Object.entries(LIVE_DEFAULTS)) if (value[key] === undefined) value[key] = fallback;
   return value;
 }
 class CallState {

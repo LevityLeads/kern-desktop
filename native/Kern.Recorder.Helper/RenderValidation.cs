@@ -6,13 +6,19 @@ namespace Kern.Recorder.Helper;
 
 internal static class RenderValidation
 {
-    public static RenderPlan Load(RenderPaths paths)
+    // throughMs: render a still-recording session up to that point. The manifest is opened with full
+    // sharing so the capture helper's atomic replace of it is never blocked, and the terminal-state
+    // check is waived; every segment-level check still applies.
+    public static RenderPlan Load(RenderPaths paths, long? throughMs = null)
     {
-        var bytes = paths.ReadBytes("manifest.json", RenderConstants.MaxManifestBytes);
+        var live = throughMs is not null;
+        if (throughMs is <= 0) throw new InvalidDataException("Render point must be a positive number of milliseconds.");
+        var bytes = paths.ReadBytes("manifest.json", RenderConstants.MaxManifestBytes, shared: live);
         var session = JsonSerializer.Deserialize<SessionManifest>(bytes, Protocol.JsonOptions)
             ?? throw new InvalidDataException("Empty source manifest.");
+        var terminal = session.State is "stopped" or "interrupted" && session.EndedAtUtc is not null;
         if (session.ProtocolVersion != Protocol.Version || session.ManifestVersion is < 1 or > 2 ||
-            session.State is not ("stopped" or "interrupted") || session.EndedAtUtc is null ||
+            (!terminal && !live) || string.IsNullOrWhiteSpace(session.State) ||
             !Guid.TryParseExact(session.SessionId, "D", out _) || session.TimelineFrequency is < 1 or > 10_000_000_000 ||
             session.DurationMs < 0 || session.Tracks is null || session.Segments is null || session.Gaps is null ||
             session.Tracks.Count > 64 || session.Segments.Count > 100_000)
@@ -76,7 +82,14 @@ internal static class RenderValidation
         if (overlappingRuns > 0) warnings.Add($"overlapping-source-runs: {overlappingRuns} overlaps; samples retained and mixed.");
         warnings.Add("timing-policy: segment starts use capture timestamps; sample durations use nominal rates. Within-run clock drift is not corrected without verified anchors.");
         warnings.Add("mix-policy: all recorded endpoints retained; no duplicate suppression or acoustic echo cancellation.");
-        return new RenderPlan(session, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), sampleCount, inputs, warnings);
+        if (throughMs is { } through)
+        {
+            // Floor to the same 1 ms grid the padded total uses, then never look past what has been captured.
+            var throughSamples = Scale(through, RenderConstants.Rate, 1000) / 16 * 16;
+            if (throughSamples > sampleCount) throw new InvalidDataException("Requested render point exceeds available audio.");
+            sampleCount = throughSamples;
+        }
+        return new RenderPlan(session, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), sampleCount, inputs, warnings, live);
     }
 
     public static void ValidateSegment(RenderPaths paths, SegmentManifest segment, TrackFormat format)

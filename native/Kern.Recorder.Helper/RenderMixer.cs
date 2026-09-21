@@ -8,7 +8,10 @@ namespace Kern.Recorder.Helper;
 internal static class RenderMixer
 {
     // A disk-backed accumulator and one decoder keep audio memory block-bounded.
-    public static (double Peak, double Gain) Mix(RenderPaths paths, RenderPlan plan, string scratch, string output)
+    // Samples [0, plan.SampleCount) never depend on source audio past that point: runs are read in
+    // order from their start and cut at the plan end, so a live render and the final render agree.
+    public static (double Peak, double Gain) Mix(RenderPaths paths, RenderPlan plan, string scratch, string output,
+        RenderPeakPolicy peakPolicy = RenderPeakPolicy.GlobalGain)
     {
         using var mixed = new FileStream(paths.Resolve(scratch), FileMode.CreateNew,
             FileAccess.ReadWrite, FileShare.None, 64 * 1024);
@@ -17,14 +20,16 @@ internal static class RenderMixer
         var sums = new float[RenderConstants.Block];
         foreach (var run in RenderRuns.Group(plan.Inputs))
         {
+            if (run.StartSample >= plan.SampleCount) continue;
+            var length = Math.Min(run.SampleCount, plan.SampleCount - run.StartSample);
             using var source = new RenderRunProvider(paths, run);
             ISampleProvider provider = source;
             if (provider.WaveFormat.SampleRate != RenderConstants.Rate)
                 provider = new WdlResamplingSampleProvider(provider, RenderConstants.Rate);
             long position = 0;
-            while (position < run.SampleCount)
+            while (position < length)
             {
-                var wanted = (int)Math.Min(samples.Length, run.SampleCount - position);
+                var wanted = (int)Math.Min(samples.Length, length - position);
                 var count = provider.Read(samples.AsSpan(0, wanted));
                 if (count == 0) throw new InvalidDataException("Decoder ended before the declared source sample count.");
                 var target = checked((run.StartSample + position) * sizeof(float));
@@ -50,8 +55,7 @@ internal static class RenderMixer
             for (var i = 0; i < count; i++) peak = Math.Max(peak, Math.Abs((double)samples[i]));
             position += count;
         }
-        // Silent endpoints do not reduce volume. Attenuate only an actual clipped sum.
-        var gain = peak > 1 ? 0.999 / peak : 1;
+        var gain = RenderPolicy.Gain(peakPolicy, peak);
         mixed.Position = 0;
         using var wave = new CanonicalWaveWriter(paths.Resolve(output), plan.SampleCount);
         var pcm = new byte[samples.Length * 2];

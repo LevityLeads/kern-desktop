@@ -1,6 +1,12 @@
 # Live call copilot: spec
 
-Status: proposed 2026-09-21. Not started. Gate: build 18 must capture both sides of a real AirPods call on Rees's PC first. Everything below assumes capture works.
+Status: built 2026-09-21 (all four modules), untested on real hardware. Build 18 (capture) and this phase ship together in build 19. Where the implementation departs from the text below:
+
+- The per-window gate is three-tier, not two. Tier 1 is Jev (TypeSafe System One, `bridge/src/calls/gate.ts`): one `noul` question ("would an assistant flag this minute?") plus a `choice` for kind, ~100ms, ~570 tokens a window. Measured on synthetic windows before wiring: 0.02 to 0.05 on small talk and vague chat, 0.85 to 0.95 on idea / fix / fact-check / commitment. Only windows Jev scores at or above `jevMin` (0.6) reach the gpt-4.1-mini extractor; Jev unavailable fails open to the extractor. Every window's Jev score is kept in `ki_call_copilot.gate_log` so the threshold can be tuned from real calls.
+- Live windows are registered one at a time (`POST /api/calls/live`, `POST /api/calls/:id/windows`, `POST /api/calls/:id/live-finalize`; migration 108) rather than through a `live: true` flag on create, because create seals the whole inventory.
+- The helper pins a "clamp" peak policy (`derived/render-policy.json`) the first time it renders mid-call, so the final render reproduces live windows byte for byte; the global peak gain was the one thing that broke prefix stability.
+- The mix is one mono track, so speaker attribution comes from the extractor's guess, not from the capture tracks.
+- Transcript batches, the stall card and the failure notice are agent messages with no model; nudges and the brief are Sonnet turns on the cron lane. Per-call ledger: `ki_call_copilot`. Watcher: `bridge/src/calls/watcher.ts`.
 
 ## Goal
 

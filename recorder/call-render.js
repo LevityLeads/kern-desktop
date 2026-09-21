@@ -4,12 +4,15 @@ const { spawn } = require('node:child_process');
 const { CallError } = require('./call-files');
 
 // A separate helper process never shares capture commands, heartbeats or locks.
-function renderCall(helperPath, sessionDir, { signal, spawnProcess = spawn } = {}) {
+// `through` (ms) asks for a mid-call render of [0, through) that publishes complete windows only.
+function renderCall(helperPath, sessionDir, { signal, spawnProcess = spawn, through } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new CallError('cancelled', 'Processing paused.')); return; }
+    const args = ['--render', sessionDir];
+    if (Number.isSafeInteger(through) && through > 0) args.push('--through', String(through));
     let child;
     try {
-      child = spawnProcess(helperPath, ['--render', sessionDir], {
+      child = spawnProcess(helperPath, args, {
         windowsHide: true, shell: false, stdio: ['ignore', 'ignore', 'pipe'],
       });
     } catch { reject(new CallError('render-start', 'Audio preparation could not start.')); return; }

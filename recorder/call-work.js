@@ -48,7 +48,8 @@ async function processCall(processor, state) {
     state.processingStage = 'validate-rendered-audio';
     validated = await validateDerived(dir, id, { signal });
   }
-  if (state.remoteId && state.fingerprint !== validated.fingerprint) {
+  // A live call binds remoteId before any fingerprint exists (the source is still being written).
+  if (state.remoteId && state.fingerprint !== null && state.fingerprint !== validated.fingerprint) {
     throw new CallError('conflict', 'Recording changed after upload. Existing cloud files were not overwritten.');
   }
   state.fingerprint = validated.fingerprint;
@@ -73,31 +74,40 @@ async function processCall(processor, state) {
   }
   const prefix = `/api/calls/${state.remoteId}`;
   let status = await api(prefix);
-  if (status.state === 'uploading') {
+  // A call opened mid-call stays `live` until the sealed manifest arrives. Windows already
+  // published live sit in state.uploaded under the same byte-derived ids, so they are skipped here.
+  const live = status.state === 'live' && state.live === true;
+  if (status.state === 'uploading' || live) {
     state.state = 'uploading'; state.progress = 0;
     await processor.save(state);
-    for (const file of inventory.files) {
-      signal.throwIfAborted();
-      if (state.uploaded.includes(file.object.id)) continue;
-      const permission = await api(`${prefix}/upload`, { method: 'POST', body: { objectId: file.object.id } });
-      const bytes = await boundedFile(dir, file.relativePath, file.object, signal);
-      try { await http.upload(permission.signedUrl, bytes, { signal, storageOrigin: state.storageOrigin }); }
-      catch (error) {
-        // Lost acknowledgements may leave an immutable object already stored. Final validation owns bytes/hash.
-        if (error.code !== 'conflict') throw error;
-      }
-      state.uploaded.push(file.object.id);
-      state.progress = state.uploaded.length / inventory.files.length;
-      await processor.save(state);
-    }
+    await uploadFiles(processor, state, api, prefix, dir, inventory, signal);
     if ((await sourceManifest(dir, id, signal)).fingerprint !== state.fingerprint) {
       throw new CallError('conflict', 'Recording changed during upload. Cloud processing stopped safely.');
     }
-    status = await api(`${prefix}/finalize`, { method: 'POST' });
+    status = live
+      ? await api(`${prefix}/live-finalize`, { method: 'POST', body: inventory.sealed })
+      : await api(`${prefix}/finalize`, { method: 'POST' });
   }
   state.uploadFinalized = true;
   state.explicitRetry = false;
   await pollCall(processor, state, api, prefix, status);
+}
+async function uploadFiles(processor, state, api, prefix, dir, inventory, signal) {
+  const { http } = processor;
+  for (const file of inventory.files) {
+    signal.throwIfAborted();
+    if (state.uploaded.includes(file.object.id)) continue;
+    const permission = await api(`${prefix}/upload`, { method: 'POST', body: { objectId: file.object.id } });
+    const bytes = await boundedFile(dir, file.relativePath, file.object, signal);
+    try { await http.upload(permission.signedUrl, bytes, { signal, storageOrigin: state.storageOrigin }); }
+    catch (error) {
+      // Lost acknowledgements may leave an immutable object already stored. Final validation owns bytes/hash.
+      if (error.code !== 'conflict') throw error;
+    }
+    state.uploaded.push(file.object.id);
+    state.progress = state.uploaded.length / inventory.files.length;
+    await processor.save(state);
+  }
 }
 async function pollCall(processor, state, api, prefix, status = null) {
   status ||= await api(prefix);
@@ -109,10 +119,10 @@ async function pollCall(processor, state, api, prefix, status = null) {
   }
   if (['deleting', 'deleted'].includes(status.state)) throw new CallError('deleted', 'This cloud call was deleted. Local audio is still available.');
   if (status.state === 'failed') throw new CallError('cloud-failed', 'Cloud transcription failed. Retry explicitly. Local audio is safe.');
-  if (!['validating', 'queued', 'transcribing'].includes(status.state)) fail('protocol', 'Kern returned an invalid call state.');
+  if (!['live', 'validating', 'queued', 'transcribing'].includes(status.state)) fail('protocol', 'Kern returned an invalid call state.');
   state.state = 'transcribing'; state.progress = 0;
   state.retryCount = 0; state.nextAttemptAt = Date.now() + 5000;
   await processor.save(state);
   processor.schedule(state.sessionId, 5000);
 }
-module.exports = { processCall };
+module.exports = { processCall, bind };
