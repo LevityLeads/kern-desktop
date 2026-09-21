@@ -317,7 +317,8 @@ internal sealed record AudioPacket(
     long? OriginalStartTicks = null,
     bool StartsNewRun = false,
     long? ObservedAtTicks = null,
-    long? MinimumStartTicks = null)
+    long? MinimumStartTicks = null,
+    bool TimestampTrusted = true)
 {
     public int FrameCount(int blockAlign) => Data.Length / blockAlign;
 }

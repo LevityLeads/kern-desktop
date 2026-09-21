@@ -169,7 +169,7 @@ public sealed class CapturePacketProcessorTests : IDisposable
     [InlineData(0, true, false)]
     [InlineData(480, false, false)]
     [InlineData(480, true, true)]
-    public void RealPositionAndTrustBoundariesRemainSeparate(long nextPosition, bool trusted, bool discontinuity)
+    public void PositionBreaksStartNewRunsWithoutLoss(long nextPosition, bool trusted, bool discontinuity)
     {
         var segments = new List<SegmentManifest>();
         using var processor = CreateProcessor(segments);
@@ -177,14 +177,14 @@ public sealed class CapturePacketProcessorTests : IDisposable
         Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(960), 1, 1)
             with { DevicePosition = nextPosition, PositionTrusted = trusted, Discontinuity = discontinuity }));
         processor.Flush(FrameTicks(1440), 1);
-        Assert.Equal(trusted ? 2 : 1, segments.Count);
-        if (trusted) Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
-        Assert.Equal(trusted ? 960 : 480, segments.Sum(s => s.SampleCount));
-        Assert.Equal(trusted ? 0 : 480, processor.OmittedFrames);
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
+        Assert.Equal(960, segments.Sum(s => s.SampleCount));
+        Assert.Equal(0, processor.OmittedFrames);
     }
 
     [Fact]
-    public void FutureRawTimestampCannotBeHiddenByContinuousDeviceFrames()
+    public void FutureRawTimestampOnContiguousFramesIsIgnored()
     {
         var segments = new List<SegmentManifest>();
         Exception? failure = null;
@@ -197,14 +197,28 @@ public sealed class CapturePacketProcessorTests : IDisposable
             with { DevicePosition = 960, ObservedAtTicks = FrameTicks(1440) }));
         processor.Flush(FrameTicks(1440), 1);
         Assert.Null(failure);
-        Assert.Equal(480, processor.OmittedFrames);
-        Assert.Equal(960, segments.Sum(s => s.SampleCount));
-        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
-        Assert.DoesNotContain(segments, segment => segment.SampleCount > 480);
+        Assert.Equal(0, processor.OmittedFrames);
+        var segment = Assert.Single(segments);
+        Assert.Equal(1440, segment.SampleCount);
+        Assert.Equal(0, segment.TimelineStartTicks);
     }
 
     [Fact]
-    public void MappingCannotPublishFramesBeyondCallbackAndFutureStop()
+    public void FutureRawTimestampOnANewRunAnchorsAtArrival()
+    {
+        var segments = new List<SegmentManifest>();
+        using var processor = CreateProcessor(segments);
+        Assert.True(processor.TryEnqueue(Packet(480, 0, 1, 1) with { ObservedAtTicks = FrameTicks(480) }));
+        Assert.True(processor.TryEnqueue(Packet(480, FrameTicks(48000), 1, 1)
+            with { DevicePosition = 9600, ObservedAtTicks = FrameTicks(1440) }));
+        processor.Flush(FrameTicks(1440), 1);
+        Assert.Equal(0, processor.OmittedFrames);
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(FrameTicks(960), segments[1].TimelineStartTicks);
+    }
+
+    [Fact]
+    public void DeviceFramesLeadingTheClockAreKeptAndEndIsClampedToTheStop()
     {
         var segments = new List<SegmentManifest>();
         using var processor = CreateProcessor(segments);
@@ -216,7 +230,12 @@ public sealed class CapturePacketProcessorTests : IDisposable
         }
         var cutoff = TimelineClock.Frequency * 207 / 1000;
         processor.Flush(cutoff, 1);
-        Assert.All(segments, segment => Assert.True(segment.TimelineStartTicks + FrameTicks(segment.SampleCount) <= cutoff));
+        Assert.Equal(0, processor.OmittedFrames);
+        var segment = Assert.Single(segments);
+        // Only the packet mapped entirely past the stop is fenced off; the run is intact.
+        Assert.Equal(22 * 480, segment.SampleCount);
+        Assert.Equal(0, segment.TimelineStartTicks);
+        Assert.True(segment.TimelineEndTicks <= cutoff);
     }
 
     [Fact]

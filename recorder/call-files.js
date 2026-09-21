@@ -8,6 +8,10 @@ const { assertSessionId } = require('./protocol');
 const MAX_MANIFEST = 32 * 1024 * 1024;
 const MAX_JSON = 4 * 1024 * 1024;
 const MAX_UPLOAD = 20 * 1024 * 1024;
+// The rendered playback file stays local and grows with call length (16 kHz mono
+// 16-bit = 32 KB/s). It must never be measured against the per-object cloud cap:
+// 20 MB is only 10.9 minutes. The renderer's own ceiling is 12 hours.
+const MAX_PLAYBACK = 44 + 12 * 3600 * 16000 * 2;
 const HASH = /^[0-9a-f]{64}$/i;
 
 class CallError extends Error {
@@ -131,4 +135,4 @@ async function boundedFile(dir, relative, expected, signal) {
   } finally { await handle.close(); }
 }
 module.exports = { CallError, fail, safePath, callDirectory, hashFile, jsonFile, sourceManifest,
-  boundedFile, MAX_MANIFEST, MAX_JSON, MAX_UPLOAD, HASH };
+  boundedFile, MAX_MANIFEST, MAX_JSON, MAX_UPLOAD, MAX_PLAYBACK, HASH };

@@ -45,10 +45,25 @@ internal static partial class WindowsNative
             FileFlagBackupSemantics,
             0);
 
+    // Windows Search opens freshly written files to index them, which races the
+    // recorder's own atomic replaces. NTFS propagates the attribute to new children.
+    internal static void ExcludeFromContentIndexing(string directory)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var attributes = File.GetAttributes(directory);
+            if (!attributes.HasFlag(FileAttributes.NotContentIndexed))
+                File.SetAttributes(directory, attributes | FileAttributes.NotContentIndexed);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+    }
+
     internal static void RestrictDirectoryToCurrentUser(string directory)
     {
         Directory.CreateDirectory(directory);
         if (!OperatingSystem.IsWindows()) return;
+        ExcludeFromContentIndexing(directory);
         var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
         var security = new System.Security.AccessControl.DirectorySecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);

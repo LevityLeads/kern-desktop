@@ -1,59 +1,74 @@
 namespace Kern.Recorder.Helper;
 
-// Device frames establish continuity. QPC anchors each new run. Bad clock data is
-// a packet omission, never a disk failure. Resetting trust must retain the last
-// accepted end, otherwise a backward timestamp can replay audio over an old run.
+// Audio bytes are never discarded because of clock data. The device frame
+// position establishes continuity: contiguous frames always extend the current
+// run, whatever their timestamps say (Bluetooth endpoints flag TimestampError
+// for long stretches, and bursty delivery is normal). A new run is anchored by
+// its QPC timestamp only when that is trusted and plausible against the callback
+// that observed it; otherwise by arrival time. Nothing is placed before the
+// previously published end, so a backward clock can delay audio, never overlap it.
 internal sealed class PacketTimeline(int sampleRate)
 {
+    // A trusted QPC anchor may precede its callback by at most this much (device
+    // and driver latency); anything earlier or in the future is treated as noise.
+    internal static readonly long MaxAnchorLagTicks = 2 * TimelineClock.Frequency;
     private AudioPacket? previous;
     private long anchorTicks;
     private long anchorPosition;
-    private long expectedPosition;
+    private long expectedPosition = long.MinValue;
     private long lastEnd = long.MinValue;
 
     public AudioPacket? Map(AudioPacket packet, int frames)
     {
+        if (frames <= 0) return null;
         try { return MapChecked(packet, frames); }
-        catch (OverflowException) { return Omit(); }
-        catch (ArgumentOutOfRangeException) { return Omit(); }
+        catch (OverflowException)
+        {
+            // Garbage clock data: place by arrival, or directly after the last run.
+            return MapChecked(packet with
+            {
+                TimestampTrusted = false,
+                ObservedAtTicks = packet.ObservedAtTicks ?? Math.Max(0, lastEnd),
+            }, frames);
+        }
     }
 
-    private AudioPacket? MapChecked(AudioPacket packet, int frames)
+    private AudioPacket MapChecked(AudioPacket packet, int frames)
     {
-        if (!packet.PositionTrusted || frames <= 0 || packet.DevicePosition < 0) return Omit();
         var duration = TimelineClock.DurationForFrames(frames, sampleRate);
-        var rawEnd = checked(packet.TimelineStartTicks + duration);
-        var observedAt = packet.ObservedAtTicks ?? rawEnd;
-        // Permit at most one sample interval of endpoint/QPC quantisation. The
-        // chosen mapping still ends at or before observation, with no overlap.
-        var rounding = Math.Max(1, TimelineClock.DurationForFrames(1, sampleRate));
-        if (rawEnd > observedAt && checked(rawEnd - observedAt) > rounding) return Omit();
-        var projectedEnd = previous is null || packet.DevicePosition < anchorPosition ? long.MaxValue : checked(anchorTicks +
-            TimelineClock.DurationForFrames(checked(packet.DevicePosition - anchorPosition + frames), sampleRate));
-        var joins = projectedEnd <= observedAt && previous is not null &&
+        var observedAt = packet.ObservedAtTicks ?? checked(packet.TimelineStartTicks + duration);
+        var joins = packet.PositionTrusted && previous is not null &&
             !packet.Discontinuity && packet.ContinuityId == previous.ContinuityId &&
             packet.Generation == previous.Generation && packet.PersistenceEpoch == previous.PersistenceEpoch &&
             packet.DevicePosition == expectedPosition;
-        var start = joins
-            ? checked(anchorTicks + TimelineClock.DurationForFrames(packet.DevicePosition - anchorPosition, sampleRate))
-            : Math.Min(packet.TimelineStartTicks, checked(observedAt - duration));
-        if (start < lastEnd || start < (packet.MinimumStartTicks ?? long.MinValue)) return Omit();
-        if (!joins)
+        var arrival = checked(observedAt - duration);
+        // The raw clock is only believed when it sits within device latency of the
+        // callback. A garbage value must neither anchor a run nor decide, at a
+        // pause or stop fence, that frames were captured after the cutoff.
+        var plausibleClock = packet.TimestampTrusted && packet.TimelineStartTicks <= arrival &&
+            checked(arrival - packet.TimelineStartTicks) <= MaxAnchorLagTicks;
+        long start;
+        if (joins)
         {
+            start = checked(anchorTicks + TimelineClock.DurationForFrames(checked(packet.DevicePosition - anchorPosition), sampleRate));
+        }
+        else
+        {
+            start = plausibleClock ? packet.TimelineStartTicks : arrival;
+            start = Math.Max(start, Math.Max(lastEnd, Math.Max(0, packet.MinimumStartTicks ?? 0)));
             anchorTicks = start;
             anchorPosition = packet.DevicePosition;
         }
         lastEnd = checked(start + duration);
-        expectedPosition = checked(packet.DevicePosition + frames);
+        expectedPosition = packet.PositionTrusted ? checked(packet.DevicePosition + frames) : long.MinValue;
         previous = packet;
         return packet with
         {
             TimelineStartTicks = start,
-            OriginalStartTicks = packet.TimelineStartTicks,
+            OriginalStartTicks = plausibleClock ? packet.TimelineStartTicks : start,
             StartsNewRun = !joins,
         };
     }
 
-    private AudioPacket? Omit() { previous = null; return null; }
     public void Reset() => previous = null;
 }

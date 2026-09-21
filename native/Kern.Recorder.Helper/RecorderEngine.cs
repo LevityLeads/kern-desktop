@@ -285,53 +285,70 @@ internal sealed partial class RecorderEngine : IDisposable
         catch { track.Dispose(); throw; }
     }
 
+    // Consecutive failed ticks (250 ms apart) before a metadata persistence problem
+    // is reported. Audio writers are independent of manifest persistence, so a
+    // transient replace failure must neither end supervision nor degrade the session.
+    internal const int HealthFaultThreshold = 8;
+
     private async Task HealthLoop(CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));
+        var faults = 0;
         try
         {
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                CheckRecovery();
-                RecorderStatus status;
-                lock (gate)
+                try
                 {
-                    if (state is "idle" or "stopped" or "interrupted") return;
-                    status = SnapshotUnsafe();
-                    if (status.FreeBytes is long freeBytes && freeBytes < MetadataReserveBytes)
+                    if (!HealthTick()) return;
+                    faults = 0;
+                }
+                catch (Exception error)
+                {
+                    if (++faults < HealthFaultThreshold) continue;
+                    lock (gate)
                     {
-                        _ = Task.Run(StopForLowStorage, CancellationToken.None);
-                        return;
-                    }
-                    if (HasActiveCaptureFailure(clock.NowTicks) && state == "recording")
-                    {
-                        state = "degraded";
-                        PersistState();
-                        status = SnapshotUnsafe();
-                    }
-                    else if (state == "degraded" && !HasActiveCaptureFailure(clock.NowTicks))
-                    {
-                        state = "recording";
-                        failure = null;
-                        PersistState();
-                        status = SnapshotUnsafe();
+                        if (state is "idle" or "stopped" or "interrupted") return;
+                        if (state == "recording") state = "degraded";
+                        failure = new { code = "capture-health-failed", message = $"Recording metadata could not be saved: {error.Message}" };
+                        StatusChanged?.Invoke(this, SnapshotUnsafe());
                     }
                 }
-                StatusChanged?.Invoke(this, status);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (Exception error)
+    }
+
+    // One supervision pass. Returns false when the session has ended.
+    internal bool HealthTick()
+    {
+        CheckRecovery();
+        RecorderStatus status;
+        lock (gate)
         {
-            // Disk/status persistence failure must not silently kill health supervision.
-            lock (gate)
+            if (state is "idle" or "stopped" or "interrupted") return false;
+            status = SnapshotUnsafe();
+            if (status.FreeBytes is long freeBytes && freeBytes < MetadataReserveBytes)
             {
-                if (state is "idle" or "stopped" or "interrupted") return;
+                _ = Task.Run(StopForLowStorage, CancellationToken.None);
+                return false;
+            }
+            if (HasActiveCaptureFailure(clock.NowTicks) && state == "recording")
+            {
                 state = "degraded";
-                failure = new { code = "capture-health-failed", message = error.Message };
-                StatusChanged?.Invoke(this, SnapshotUnsafe());
+                PersistState();
+                status = SnapshotUnsafe();
+            }
+            else if (state == "degraded" && !HasActiveCaptureFailure(clock.NowTicks))
+            {
+                state = "recording";
+                failure = null;
+                PersistState();
+                status = SnapshotUnsafe();
             }
         }
+        StatusChanged?.Invoke(this, status);
+        return true;
     }
 
     private void StopForLowStorage()
@@ -394,6 +411,7 @@ internal sealed partial class RecorderEngine : IDisposable
             throw new IOException("At least 256 MB of free disk space is required to start recording.");
         var parentPath = Path.GetDirectoryName(Path.GetFullPath(sessionPath)) ?? throw new IOException("Recording path has no parent.");
         Directory.CreateDirectory(parentPath);
+        WindowsNative.ExcludeFromContentIndexing(parentPath);
         var probe = Path.Combine(parentPath, $".kern-write-{Guid.NewGuid():N}.tmp");
         File.WriteAllBytes(probe, [0x4b]);
         File.Delete(probe);

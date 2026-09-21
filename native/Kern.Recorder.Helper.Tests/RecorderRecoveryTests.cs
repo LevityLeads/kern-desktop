@@ -146,6 +146,30 @@ public sealed class RecorderRecoveryTests : IDisposable
         engine.Stop(Control());
     }
 
+    [Fact]
+    public async Task ManifestReplaceFailureDoesNotEndHealthSupervision()
+    {
+        var backend = new FakeBackend();
+        using var engine = Start(backend);
+        var track = backend.Created[0];
+        var manifest = Path.Combine(root, "manifest.json");
+        // Settle the post-start device reconcile first so the next persist is the
+        // health loop's own state transition, not recovery's.
+        engine.CheckRecovery();
+        // Make the manifest unreplaceable, then force a transition that persists it.
+        File.Delete(manifest);
+        Directory.CreateDirectory(manifest);
+        track.Health = "unknown";
+        await WaitUntil(() => engine.Snapshot().State == "degraded", 10_000);
+        Directory.Delete(manifest);
+        track.Health = null;
+        // A supervision loop killed by the failed replace can never flip this back.
+        await WaitUntil(() => engine.Snapshot().State == "recording", 15_000);
+        Assert.Null(engine.Snapshot().Failure);
+        engine.Stop(Control());
+        Assert.Equal("stopped", SessionStore.Open(root, backend.SessionId!).Manifest.State);
+    }
+
     private RecorderEngine Start(FakeBackend backend, TimelineClock? clock = null)
     {
         var engine = new RecorderEngine(backend, clock ?? new TimelineClock(), _ => 1024L * 1024 * 1024);
@@ -153,9 +177,9 @@ public sealed class RecorderRecoveryTests : IDisposable
         engine.Start(new StartRequest(backend.SessionId, root, new MicrophoneSelection("device", "fifine"), 5000));
         return engine;
     }
-    private static async Task WaitUntil(Func<bool> predicate)
+    private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 1000)
     {
-        for (var i = 0; i < 50 && !predicate(); i++) await Task.Delay(20);
+        for (var i = 0; i < timeoutMs / 20 && !predicate(); i++) await Task.Delay(20);
         Assert.True(predicate());
     }
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
@@ -197,6 +221,7 @@ public sealed class RecorderRecoveryTests : IDisposable
         public bool IsCapturing { get; private set; }
         public bool HasWriterFailure { get; set; }
         public bool PersistAtStart, Paused, Muted, Disposed;
+        public string? Health;
         private bool emitted;
         public void Fail() { IsCapturing = false; onFailure(this, new IOException("Device invalidated")); }
         public void EmitPacket() => emitted = true;
@@ -210,7 +235,7 @@ public sealed class RecorderRecoveryTests : IDisposable
         public TrackManifest ToManifest() => new() { TrackId = TrackId, EndpointId = endpointId, Name = endpointId,
             Kind = kind, DefaultRoles = [], Format = new(48000, 2, 16, 4, 192000, "pcm", null, null, null) };
         public TrackStatus Status(long nowTicks) => new(TrackId, endpointId, kind,
-            IsRetired ? "failed" : emitted ? "capturing-signal" : "healthy-idle", 0, emitted ? 480 : 0, 0, clock.NowTicks, 0, [], null, IsRetired);
+            Health ?? (IsRetired ? "failed" : emitted ? "capturing-signal" : "healthy-idle"), 0, emitted ? 480 : 0, 0, clock.NowTicks, 0, [], null, IsRetired);
         public void Dispose() => Disposed = true;
     }
 }

@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { hashFile, jsonFile, sourceManifest, fail, MAX_UPLOAD } = require('./call-files');
+const { hashFile, jsonFile, sourceManifest, fail, MAX_UPLOAD, MAX_PLAYBACK } = require('./call-files');
 
 function stableId(sessionId, fingerprint, relativePath) {
   const bytes = crypto.createHash('sha256').update(`${sessionId}\n${fingerprint}\n${relativePath}`).digest().subarray(0, 16);
@@ -20,7 +20,7 @@ async function validateDerived(dir, id, { playbackOnly = false, signal } = {}) {
       derived.audio?.relativePath !== 'derived/call.wav' || derived.audio.byteLength !== 44 + derived.sampleCount * 2 ||
       derived.durationSeconds !== derived.sampleCount / 16000 || !Array.isArray(derived.windows) ||
       !Array.isArray(derived.warnings) || derived.warnings.some(w => typeof w !== 'string' || w.length > 2000)) fail();
-  const playbackFile = (await hashFile(dir, derived.audio.relativePath, derived.audio, signal)).file;
+  const playbackFile = (await hashFile(dir, derived.audio.relativePath, derived.audio, signal, MAX_PLAYBACK)).file;
   if (playbackOnly) return { ...source, derived, playbackFile };
   if (derived.sampleCount % 16 || derived.windows.length !== Math.ceil(derived.sampleCount / 960000)) fail();
   for (let i = 0; i < derived.windows.length; i += 1) {

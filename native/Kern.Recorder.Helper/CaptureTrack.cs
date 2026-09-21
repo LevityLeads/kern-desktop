@@ -6,7 +6,9 @@ namespace Kern.Recorder.Helper;
 
 internal sealed class CaptureTrack : ICaptureTrack
 {
-    private const int CaptureQueueCapacity = 32;
+    // ~5 s of 10 ms packets: enough to ride out a bounded metadata replace retry
+    // on the writer thread without overflowing and dropping frames.
+    private const int CaptureQueueCapacity = 512;
     private readonly object gate = new();
     private readonly string sessionPath;
     private readonly TimelineClock clock;
@@ -281,11 +283,10 @@ internal sealed class CaptureTrack : ICaptureTrack
                     expectedDevicePosition = null;
                     return;
                 }
-                // A TimestampError invalidates BOTH of WASAPI's position outputs, so a
-                // device position reported alongside it must not be compared, advanced,
-                // or persisted. Treat the running position as unknown for this packet.
-                var positionTrusted = !flags.HasFlag(AudioClientBufferFlags.TimestampError) &&
-                    devicePosition >= 0 && devicePosition <= long.MaxValue - frames;
+                // WASAPI's TimestampError marks the QPC value as uncertain. The device
+                // position is still the stream's frame counter, so continuity holds;
+                // only the clock anchor for a new run is affected (see below).
+                var positionTrusted = devicePosition >= 0 && devicePosition <= long.MaxValue - frames;
                 var discontinuity = flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity);
                 if (!positionTrusted || discontinuity) continuityId++;
                 if (discontinuity)
@@ -313,19 +314,19 @@ internal sealed class CaptureTrack : ICaptureTrack
                     return;
                 }
 
-                var hasValidTimestamp = positionTrusted && qpcPosition > 0;
-                long packetStart;
-                try
+                // Audio is never dropped for clock trouble. An untrusted or unconvertible
+                // QPC value anchors the packet at its arrival instead; Bluetooth endpoints
+                // in particular flag TimestampError for long stretches while the frames
+                // themselves are perfectly good.
+                var timestampTrusted = !flags.HasFlag(AudioClientBufferFlags.TimestampError) && qpcPosition > 0;
+                var packetStart = callbackTicks - TimelineClock.DurationForFrames(frames, Format.SampleRate);
+                if (timestampTrusted)
                 {
-                    if (!hasValidTimestamp) throw new ArgumentOutOfRangeException(nameof(qpcPosition));
-                    packetStart = clock.FromQpc100Nanoseconds(qpcPosition);
-                }
-                catch (Exception error) when (error is OverflowException or ArgumentOutOfRangeException)
-                {
-                    continuityId++;
-                    expectedDevicePosition = null;
-                    RecordTimingOmission(frames);
-                    return;
+                    try { packetStart = clock.FromQpc100Nanoseconds(qpcPosition); }
+                    catch (Exception error) when (error is OverflowException or ArgumentOutOfRangeException)
+                    {
+                        timestampTrusted = false;
+                    }
                 }
                 var skipFrames = FramesStrictlyBefore(
                     packetStart,
@@ -362,9 +363,9 @@ internal sealed class CaptureTrack : ICaptureTrack
                 else consecutiveSilentFrames = 0;
                 copy = buffer[..alignedBytes].ToArray();
                 packet = new AudioPacket(copy, devicePosition, qpcPosition, packetStart, generation, persistenceEpoch,
-                    PositionTrusted: positionTrusted && hasValidTimestamp, Discontinuity: discontinuity,
+                    PositionTrusted: positionTrusted, Discontinuity: discontinuity,
                     ContinuityId: continuityId, ObservedAtTicks: callbackTicks,
-                    MinimumStartTicks: minimumPersistenceTicks);
+                    MinimumStartTicks: minimumPersistenceTicks, TimestampTrusted: timestampTrusted);
             }
 
             if (packet is not null && packetProcessor.TryEnqueue(packet)) return;
