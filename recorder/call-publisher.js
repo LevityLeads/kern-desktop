@@ -108,10 +108,21 @@ async function publishFinal(ctx, state) {
 async function finalize(ctx, state) {
   const durationMs = state.finalFrames / 16;
   if (state.windows.length !== windowCount(durationMs) || !state.windows.every(w => w.uploaded)) throw conflict();
-  const result = await caller(ctx, state)(`/api/calls/${state.remoteId}/live-finalize`, {
-    method: 'POST',
-    body: { version: 1, sessionId: state.sessionId, durationMs, objects: state.windows.map(windowObject) },
-  });
+  let result;
+  try {
+    result = await caller(ctx, state)(`/api/calls/${state.remoteId}/live-finalize`, {
+      method: 'POST',
+      body: { version: 1, sessionId: state.sessionId, durationMs, objects: state.windows.map(windowObject) },
+    });
+  } catch (error) {
+    // Kern refuses the seal (409) when it has not seen every window's bytes. Registrations and
+    // uploads are idempotent, so resend everything once rather than stranding the call.
+    if (error.code !== 'conflict' || state.resentForSeal) throw error;
+    state.resentForSeal = true;
+    for (const entry of state.windows) entry.uploaded = false;
+    await ctx.save(state);
+    throw new CallError('seal-refused', 'Kern asked for the call again. Resending it.', true);
+  }
   if (typeof result.state !== 'string') throw new CallError('protocol', 'Kern sent an unexpected response.');
   state.finalized = true;
   await ctx.save(state);

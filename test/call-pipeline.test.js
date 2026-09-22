@@ -254,3 +254,22 @@ test('stop and quit mid-upload: uploads are cancelled at once and the final leng
   assert.equal(h.state().finalFrames, 70000 * 16);
   assert.equal(h.state().error, null, 'a cancellation is not recorded as a failure');
 });
+
+test('a refused seal resends every window once, then finalizes instead of stranding the call', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { state: 'stopped', frames: 70000 * 16 });
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true } });
+  // Kern lost track of the uploads (e.g. storage rolled back) and refuses the first seal.
+  let refused = false;
+  h.kern.fail = (method, pathname) => {
+    if (!refused && pathname.endsWith('/live-finalize')) { refused = true; h.kern.uploaded.clear(); return json({ error: 'call_incomplete' }, 409); }
+    return null;
+  };
+  await h.fire();
+  assert.equal(h.kern.finalized, null);
+  assert.equal(h.state().stage === 'failed', false);
+  assert.ok(h.state().windows.every(w => w.uploaded === false));
+  await h.fire();
+  assert.equal(h.kern.finalized.durationMs, 70000);
+  assert.equal(h.state().stage, 'transcribing');
+});
