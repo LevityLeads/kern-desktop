@@ -68,6 +68,33 @@ test('a rendered call past the renderer ceiling is still rejected', async () => 
     derived.durationSeconds = derived.sampleCount / RATE;
     derived.audio.byteLength = 44 + derived.sampleCount * 2;
     fs.writeFileSync(derivedPath, JSON.stringify(derived));
-    await assert.rejects(validateDerived(dir, SESSION, {}), e => e.code === 'invalid-recording');
+    await assert.rejects(validateDerived(dir, SESSION, {}), e => e.code === 'invalid-recording' && e.reason === 'derived-over-ceiling');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('every validation failure names the exact check that failed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-derived-'));
+  try {
+    const dir = renderedSession(root, 16 * 16);
+    const derivedPath = path.join(dir, 'derived', 'manifest.json');
+    const original = fs.readFileSync(derivedPath, 'utf8');
+    const reasonFor = async mutate => {
+      const derived = JSON.parse(original);
+      mutate(derived);
+      fs.writeFileSync(derivedPath, JSON.stringify(derived));
+      let reason = null;
+      await assert.rejects(validateDerived(dir, SESSION, {}), e => { reason = e.reason; return e.code === 'invalid-recording'; });
+      return reason;
+    };
+    assert.equal(await reasonFor(d => { d.complete = false; }), 'derived-incomplete');
+    assert.equal(await reasonFor(d => { d.sourceFingerprint = 'f'.repeat(64); }), 'derived-source-fingerprint');
+    assert.equal(await reasonFor(d => { d.durationSeconds += 1; }), 'derived-duration');
+    assert.equal(await reasonFor(d => { d.audio.byteLength += 2; }), 'derived-audio-shape');
+    assert.equal(await reasonFor(d => { d.windows = []; }), 'derived-window-count');
+    assert.equal(await reasonFor(d => { d.windows[0].sha256 = 'a'.repeat(64); }), 'file-hash-mismatch');
+    // Playback file truncated on disk: the cached manifest still matches itself, the bytes do not.
+    fs.writeFileSync(derivedPath, original);
+    fs.truncateSync(path.join(dir, 'derived', 'call.wav'), 10);
+    await assert.rejects(validateDerived(dir, SESSION, {}), e => e.reason === 'file-length-mismatch');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

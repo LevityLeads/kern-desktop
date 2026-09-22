@@ -3,7 +3,7 @@
 window.createCaptureView = function createCaptureView({ api, reportError, onStopped }) {
   const byId = (id) => document.getElementById(id);
   const el = Object.fromEntries(['state', 'start', 'stop', 'pause', 'mute', 'microphone', 'consent',
-    'disk', 'timer', 'tracks', 'status-copy', 'refresh-devices'].map((id) => [id, byId(id)]));
+    'disk', 'timer', 'tracks', 'status-copy', 'refresh-devices', 'build'].map((id) => [id, byId(id)]));
   const activeStates = new Set(['starting', 'recording', 'pausing', 'paused', 'muting', 'unmuting',
     'resuming', 'stopping', 'degraded', 'suspended']);
   const pendingStates = new Set(['starting', 'pausing', 'muting', 'unmuting', 'resuming', 'stopping']);
@@ -60,6 +60,8 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
       node.querySelector('.track-meter').value = Number.isFinite(track.peak) ? track.peak : 0;
       const detail = [];
       if (track.defaultRoles?.length) detail.push(track.defaultRoles.join(', '));
+      // Live proof that audio is reaching disk, per track, while the call is still running.
+      if (track.counters) detail.push(`${track.counters.segmentsPublished} chunks · ${Math.round(track.counters.persistedFrames / 1000)}k frames kept`);
       if (track.droppedFrames) detail.push(`${track.droppedFrames} dropped`);
       if (track.message) detail.push(track.message);
       node.querySelector('.track-detail').textContent = detail.join(' · ');
@@ -84,6 +86,8 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
     // A pending command must never remove the Stop escape hatch.
     el.stop.disabled = !active || state === 'stopping';
     el.disk.textContent = status.freeBytes == null ? 'Disk space unknown' : `${window.recorderFormat.bytes(status.freeBytes)} free`;
+    // Always visible, so a screenshot or a paste identifies the installed build with no follow-up.
+    el.build.textContent = typeof status.build === 'string' ? `Build ${status.build}` : 'Build unknown';
     el['status-copy'].textContent = pendingStates.has(state)
       ? `${state.replaceAll('-', ' ')}. Waiting for capture acknowledgement.`
       : status.message || (active ? 'Kern mute is separate from Teams mute.' : 'Ready. Recording works offline. Originals stay local.');

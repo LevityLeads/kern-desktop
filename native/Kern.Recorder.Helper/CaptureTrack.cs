@@ -29,6 +29,12 @@ internal sealed class CaptureTrack : ICaptureTrack
     private volatile bool writerFailed;
     private long sampleCount;
     private long droppedFrames;
+    private long packets;
+    private long persistedFrames;
+    private long silentFramesSkipped;
+    private long timestampErrorPackets;
+    private long discontinuities;
+    private long segmentsPublished;
     private long lastHeartbeatTicks;
     private long? expectedDevicePosition;
     private long consecutiveSilentFrames;
@@ -76,7 +82,7 @@ internal sealed class CaptureTrack : ICaptureTrack
             segmentDurationMs,
             CaptureQueueCapacity,
             clock,
-            onSegmentFinalised,
+            segment => { Interlocked.Increment(ref segmentsPublished); onSegmentFinalised(segment); },
             RecordWriterFailure,
             onPacketOmitted: RecordTimingOmission);
         recorder.DataAvailable += OnDataAvailable;
@@ -235,9 +241,12 @@ internal sealed class CaptureTrack : ICaptureTrack
                     ? "Endpoint is active but has not emitted packets. Silence is inferred."
                     : "Capture thread has not emitted a heartbeat.";
             }
+            var counters = new TrackCounters(
+                packets, sampleCount, persistedFrames, silentFramesSkipped, timestampErrorPackets,
+                discontinuities, packetProcessor.OmittedFrames, droppedFrames, Interlocked.Read(ref segmentsPublished));
             return new TrackStatus(
                 TrackId, Name, Kind, currentHealth, peak, sampleCount, droppedFrames,
-                lastHeartbeatTicks, packetProcessor.LastWriteTicks, DefaultRoles, currentMessage, retired);
+                lastHeartbeatTicks, packetProcessor.LastWriteTicks, DefaultRoles, currentMessage, retired, counters);
         }
     }
 
@@ -288,6 +297,9 @@ internal sealed class CaptureTrack : ICaptureTrack
                 // only the clock anchor for a new run is affected (see below).
                 var positionTrusted = devicePosition >= 0 && devicePosition <= long.MaxValue - frames;
                 var discontinuity = flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity);
+                packets++;
+                if (discontinuity) discontinuities++;
+                if (flags.HasFlag(AudioClientBufferFlags.TimestampError)) timestampErrorPackets++;
                 if (!positionTrusted || discontinuity) continuityId++;
                 if (discontinuity)
                 {
@@ -358,7 +370,11 @@ internal sealed class CaptureTrack : ICaptureTrack
                 if (peak == 0)
                 {
                     consecutiveSilentFrames += frames;
-                    if (consecutiveSilentFrames > Format.SampleRate) return;
+                    if (consecutiveSilentFrames > Format.SampleRate)
+                    {
+                        silentFramesSkipped += frames;
+                        return;
+                    }
                 }
                 else consecutiveSilentFrames = 0;
                 copy = buffer[..alignedBytes].ToArray();
@@ -368,7 +384,11 @@ internal sealed class CaptureTrack : ICaptureTrack
                     MinimumStartTicks: minimumPersistenceTicks, TimestampTrusted: timestampTrusted);
             }
 
-            if (packet is not null && packetProcessor.TryEnqueue(packet)) return;
+            if (packet is not null && packetProcessor.TryEnqueue(packet))
+            {
+                lock (gate) persistedFrames += copy!.Length / Format.BlockAlign;
+                return;
+            }
 
             if (copy is not null)
             {

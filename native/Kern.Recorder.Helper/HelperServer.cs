@@ -17,7 +17,7 @@ internal sealed class HelperServer : IDisposable
     {
         this.options = options;
         devices = new AudioDevices();
-        engine = new RecorderEngine(devices, new TimelineClock());
+        engine = new RecorderEngine(devices, new TimelineClock()) { AppBuild = options.AppBuild };
         engine.StatusChanged += OnStatusChanged;
         devices.StartNotifications(shutdown.Token);
     }
@@ -97,7 +97,7 @@ internal sealed class HelperServer : IDisposable
         RequireOnlyProperties(payload, "protocolVersion");
         if (!payload.TryGetProperty("protocolVersion", out var version) || version.GetInt32() != Protocol.Version)
             throw new ProtocolException("incompatible-protocol", "Capture protocol is incompatible.");
-        return new { protocolVersion = Protocol.Version, helperVersion = typeof(HelperServer).Assembly.GetName().Version?.ToString() };
+        return new { protocolVersion = Protocol.Version, helperVersion = RecorderEngine.HelperVersion };
     }
 
     private static T Deserialize<T>(JsonElement payload) where T : class =>

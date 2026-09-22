@@ -8,6 +8,7 @@ const { randomBytes } = require('crypto');
 const { HelperTransport } = require('./helper-transport');
 const { PROTOCOL_VERSION, isActiveState } = require('./protocol');
 const catalog = require('./session-catalog');
+const { readBuildInfo } = require('./build-info');
 
 const HELPER_CONNECT_TIMEOUT_MS = 7000;
 const HELPER_COMMAND_TIMEOUT_MS = 1000;
@@ -46,10 +47,12 @@ class RecorderSupervisor extends EventEmitter {
     transportFactory = (options) => new HelperTransport(options),
     powerSaveBlocker,
     now = () => Date.now(),
+    buildInfo = readBuildInfo(),
   }) {
     super();
     this.recordingsRoot = recordingsRoot;
     this.helperPath = helperPath;
+    this.buildInfo = buildInfo;
     this.platform = platform;
     this.spawnProcess = spawnProcess;
     this.transportFactory = transportFactory;
@@ -63,6 +66,7 @@ class RecorderSupervisor extends EventEmitter {
     this.lastHeartbeatAt = 0;
     this.status = {
       protocolVersion: PROTOCOL_VERSION,
+      build: this.buildInfo.label,
       state: 'idle',
       sessionId: null,
       micMuted: false,
@@ -80,7 +84,8 @@ class RecorderSupervisor extends EventEmitter {
   }
 
   _setStatus(patch) {
-    this.status = { ...this.status, ...patch };
+    // Helper payloads never carry the build; it is owned here and must survive every merge.
+    this.status = { ...this.status, ...patch, build: this.buildInfo.label };
     this.emit('status', this.snapshot());
   }
 
@@ -127,6 +132,7 @@ class RecorderSupervisor extends EventEmitter {
       '--pipe', pipeName,
       '--parent-pid', String(process.pid),
       '--protocol', String(PROTOCOL_VERSION),
+      '--app-build', this.buildInfo.label,
     ], {
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],

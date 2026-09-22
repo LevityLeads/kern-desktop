@@ -73,7 +73,8 @@ class CallProcessing extends EventEmitter {
     const processingStage = error.processingStage || stage || 'unknown-stage';
     const errorOperation = typeof error.syscall === 'string' && /^[a-z][a-z0-9_]{0,31}$/i.test(error.syscall)
       ? error.syscall : null;
-    return { processingStage, errorCode, errorOperation,
+    const errorReason = error instanceof CallError && typeof error.reason === 'string' ? error.reason : null;
+    return { processingStage, errorCode, errorOperation, errorReason,
       error: error instanceof CallError ? error.message
         : `Call processing failed at ${processingStage} (${errorCode}${errorOperation ? `: ${errorOperation}` : ''}). Existing recording files were not deleted.` };
   }
@@ -87,20 +88,22 @@ class CallProcessing extends EventEmitter {
   // retroactively enrolls or excludes a recording already under way.
   async snapshotStartConsent() {
     try { return await this.store.preference(); }
-    catch { return { enabled: false }; }
+    catch { return { enabled: false, liveCalls: false }; }
   }
   // Main calls this exactly once for a newly started call, never for library discovery.
   async onStarted(id, snapshot = null) {
     return this.lock(id, async () => {
       const state = await this.store.load(id);
       if (state.state !== 'local') return;
-      state.consent = snapshot ? snapshot.enabled === true : (await this.store.preference()).enabled;
+      const preference = snapshot || await this.store.preference();
+      state.consent = preference.enabled === true;
       try { state.origin = state.consent ? this.http.origin() : null; }
       catch { state.origin = null; }
       state.state = 'recording';
       await this.save(state);
       // Consent was snapshotted at capture start, so live publishing follows the same decision.
-      if (state.consent && state.origin && !this.closed && !this.live.has(id)) {
+      // It also needs the explicit liveCalls opt-in; the post-call path is unchanged without it.
+      if (state.consent && state.origin && preference.liveCalls === true && !this.closed && !this.live.has(id)) {
         this.live.set(id, startLivePublisher(this, id));
       }
     });
@@ -170,7 +173,7 @@ class CallProcessing extends EventEmitter {
     }
     return { state: state.state, progress: state.progress || 0, error: state.error || null,
       processingStage: state.processingStage || null, errorCode: state.errorCode || null,
-      errorOperation: state.errorOperation || null,
+      errorOperation: state.errorOperation || null, errorReason: state.errorReason || null,
       playbackUrl, transcript: state.transcript || null, warnings: state.warnings || [] };
   }
   async getPlaybackFile(id) {

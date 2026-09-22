@@ -116,9 +116,14 @@ test('call state persists cloud preference and never treats corrupt state as con
   const settings = path.join(root, 'call-settings.json');
   try {
     const store = new CallState(root, settings);
-    assert.deepEqual(await store.preference(), { enabled: false });
+    assert.deepEqual(await store.preference(), { enabled: false, liveCalls: false });
     await store.setPreference(true);
-    assert.deepEqual(await store.preference(), { enabled: true });
+    assert.deepEqual(await store.preference(), { enabled: true, liveCalls: false });
+    // A UI toggle merges into the file; it never erases a setting it does not own.
+    fs.writeFileSync(settings, JSON.stringify({ version: 1, cloudTranscription: true, liveCalls: true }));
+    await store.setPreference(false);
+    assert.deepEqual(await store.preference(), { enabled: false, liveCalls: true });
+    assert.equal(JSON.parse(fs.readFileSync(settings, 'utf8')).liveCalls, true);
     const dir = path.join(root, SESSION);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'processing.json'), '{ corrupt');

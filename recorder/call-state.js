@@ -53,19 +53,28 @@ class CallState {
     const file = await safePath(dir, JOB_FILE, true);
     await writeJsonWithRetry(file, value);
   }
+  // `liveCalls` gates mid-call window publishing (the live copilot). It has no UI yet and defaults
+  // off, so the capture foundation can be proven on its own before the live path runs on top of it.
+  // Enable by adding "liveCalls": true to call-settings.json.
   async preference() {
     try {
       const value = await readJson(this.settingsPath);
-      return { enabled: value?.cloudTranscription === true };
+      return { enabled: value?.cloudTranscription === true, liveCalls: value?.liveCalls === true };
     } catch (error) {
-      if (error.code === 'ENOENT') return { enabled: false };
+      if (error.code === 'ENOENT') return { enabled: false, liveCalls: false };
       throw new CallError('settings', 'Transcription preference could not be read.');
     }
   }
   async setPreference(enabled) {
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be boolean');
-    const write = this.preferenceWrite.catch(() => {}).then(() =>
-      writeJsonWithRetry(this.settingsPath, { version: 1, cloudTranscription: enabled }));
+    const write = this.preferenceWrite.catch(() => {}).then(async () => {
+      // Merge so a toggle from the UI never erases a setting it does not own.
+      let existing = {};
+      try { existing = await readJson(this.settingsPath); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      const current = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+      await writeJsonWithRetry(this.settingsPath, { ...current, version: 1, cloudTranscription: enabled });
+    });
     this.preferenceWrite = write;
     await write;
     return { enabled };

@@ -18,7 +18,9 @@ const STORAGE = 'https://store.example.org';
 const RATE = 16000, CORE = 60 * RATE, OVERLAP = RATE, TICKS = 10_000_000, ORIGIN_TICKS = 1234567;
 
 function sha(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
-function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'kern-live-')); }
+// realpath: the processor resolves call directories through realpath, and the Windows runner's
+// temp dir is a short-name path (RUNNER~1), so an unresolved expectation never matches there.
+function tmp() { return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kern-live-'))); }
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -300,7 +302,7 @@ test('onStarted launches a publisher and onStopped waits for its in-flight tick 
   const spawned = new Promise(resolve => { onSpawned = resolve; });
   const { processor } = setup(t, { mic: 135000, sys: 135000 }, {}, { deferKill: true,
     onSpawn: e => { events.push(e); if (e === 'spawn') onSpawned(); } });
-  await processor.onStarted(SESSION, { enabled: true });
+  await processor.onStarted(SESSION, { enabled: true, liveCalls: true });
   assert.ok(processor.live.has(SESSION));
   const tick = processor.live.get(SESSION).tick();
   await spawned;
@@ -314,6 +316,16 @@ test('onStarted launches a publisher and onStopped waits for its in-flight tick 
   assert.equal(state.live, true);
   assert.equal(state.liveWindows, 0);
   assert.equal(state.liveError, null);
+});
+
+test('onStarted never launches a publisher without the liveCalls opt-in, even with consent', async t => {
+  const { processor } = setup(t, { mic: 135000, sys: 135000 });
+  await processor.onStarted(SESSION, { enabled: true });
+  assert.equal(processor.live.has(SESSION), false);
+  const state = await processor.store.load(SESSION);
+  assert.equal(state.state, 'recording');
+  assert.equal(state.consent, true);
+  assert.equal(state.live, false);
 });
 
 test('call state validates live fields and defaults them for older files', async t => {

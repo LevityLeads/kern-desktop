@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { hashFile, jsonFile, sourceManifest, fail, HASH, MAX_JSON, MAX_UPLOAD, MAX_PLAYBACK } = require('./call-files');
+const { hashFile, jsonFile, sourceManifest, fail, invalid, HASH, MAX_JSON, MAX_UPLOAD, MAX_PLAYBACK } = require('./call-files');
 
 const RATE = 16000;
 const CORE = 60 * RATE;
@@ -26,24 +26,34 @@ function windowGeometry(index, sampleCount) {
 }
 function checkWindow(w, index, sampleCount) {
   const { coreStart, coreEnd, start, end } = windowGeometry(index, sampleCount);
-  if (!w || typeof w !== 'object' || w.windowId !== windowName(index) || w.relativePath !== `derived/${windowName(index)}.wav` ||
-      w.startSample !== start || w.endSample !== end || w.coreStartSample !== coreStart || w.coreEndSample !== coreEnd ||
-      w.byteLength !== 44 + (end - start) * 2 || typeof w.sha256 !== 'string' || !HASH.test(w.sha256)) fail();
+  if (!w || typeof w !== 'object' || w.windowId !== windowName(index) || w.relativePath !== `derived/${windowName(index)}.wav`) invalid('window-identity');
+  if (w.startSample !== start || w.endSample !== end || w.coreStartSample !== coreStart || w.coreEndSample !== coreEnd) invalid('window-geometry');
+  if (w.byteLength !== 44 + (end - start) * 2 || typeof w.sha256 !== 'string' || !HASH.test(w.sha256)) invalid('window-artifact');
+}
+// Each check has its own reason so a failure names the field, not the file.
+function checkDerivedManifest(derived, id, source) {
+  if (!derived || typeof derived !== 'object') invalid('derived-manifest-shape');
+  if (derived.version !== 1 || derived.rendererVersion !== 'kern-call-render-1') invalid('derived-renderer-version');
+  if (!derived.complete) invalid('derived-incomplete');
+  if (derived.sessionId !== id) invalid('derived-session');
+  if (derived.sourceFingerprint !== source.fingerprint) invalid('derived-source-fingerprint');
+  if (derived.sampleRate !== RATE || derived.channels !== 1 || derived.bitsPerSample !== 16) invalid('derived-format');
+  if (!Number.isSafeInteger(derived.sampleCount) || derived.sampleCount < 1) invalid('derived-sample-count');
+  if (derived.sampleCount > MAX_SAMPLES) invalid('derived-over-ceiling');
+  if (derived.sourceIntegrity !== 'verified') invalid('derived-source-integrity');
+  if (derived.audio?.relativePath !== 'derived/call.wav' || derived.audio.byteLength !== 44 + derived.sampleCount * 2) invalid('derived-audio-shape');
+  if (derived.durationSeconds !== derived.sampleCount / RATE) invalid('derived-duration');
+  if (!Array.isArray(derived.windows)) invalid('derived-windows-shape');
+  if (!Array.isArray(derived.warnings) || derived.warnings.some(w => typeof w !== 'string' || w.length > 2000)) invalid('derived-warnings-shape');
 }
 async function validateDerived(dir, id, { playbackOnly = false, signal } = {}) {
   const source = await sourceManifest(dir, id, signal);
   const derived = await jsonFile(dir, 'derived/manifest.json');
-  if (derived.version !== 1 || derived.rendererVersion !== 'kern-call-render-1' || !derived.complete ||
-      derived.sessionId !== id || derived.sourceFingerprint !== source.fingerprint ||
-      derived.sampleRate !== RATE || derived.channels !== 1 || derived.bitsPerSample !== 16 ||
-      !Number.isSafeInteger(derived.sampleCount) || derived.sampleCount < 1 ||
-      derived.sampleCount > MAX_SAMPLES || derived.sourceIntegrity !== 'verified' ||
-      derived.audio?.relativePath !== 'derived/call.wav' || derived.audio.byteLength !== 44 + derived.sampleCount * 2 ||
-      derived.durationSeconds !== derived.sampleCount / RATE || !Array.isArray(derived.windows) ||
-      !Array.isArray(derived.warnings) || derived.warnings.some(w => typeof w !== 'string' || w.length > 2000)) fail();
+  checkDerivedManifest(derived, id, source);
   const playbackFile = (await hashFile(dir, derived.audio.relativePath, derived.audio, signal, MAX_PLAYBACK)).file;
   if (playbackOnly) return { ...source, derived, playbackFile };
-  if (derived.sampleCount % 16 || derived.windows.length !== Math.ceil(derived.sampleCount / CORE)) fail();
+  if (derived.sampleCount % 16) invalid('derived-sample-grid');
+  if (derived.windows.length !== Math.ceil(derived.sampleCount / CORE)) invalid('derived-window-count');
   for (let i = 0; i < derived.windows.length; i += 1) {
     checkWindow(derived.windows[i], i, derived.sampleCount);
     await hashFile(dir, derived.windows[i].relativePath, derived.windows[i], signal);
@@ -55,23 +65,23 @@ async function validateDerived(dir, id, { playbackOnly = false, signal } = {}) {
 async function validateLiveManifest(dir, id) {
   const live = await jsonFile(dir, LIVE_MANIFEST, MAX_JSON);
   if (!live || live.version !== 1 || live.rendererVersion !== 'kern-call-render-1' || live.complete !== false ||
-      live.sessionId !== id || live.sampleRate !== RATE || live.channels !== 1 || live.bitsPerSample !== 16 ||
-      !Number.isSafeInteger(live.throughSamples) || live.throughSamples < 0 || live.throughSamples > MAX_SAMPLES ||
+      live.sessionId !== id || live.sampleRate !== RATE || live.channels !== 1 || live.bitsPerSample !== 16) invalid('live-manifest-header');
+  if (!Number.isSafeInteger(live.throughSamples) || live.throughSamples < 0 || live.throughSamples > MAX_SAMPLES ||
       !Array.isArray(live.windows) || live.windows.length > MAX_LIVE_WINDOWS ||
-      live.windows.length * CORE > live.throughSamples) fail();
+      live.windows.length * CORE > live.throughSamples) invalid('live-manifest-windows');
   for (let i = 0; i < live.windows.length; i += 1) checkWindow(live.windows[i], i, Infinity);
   return live;
 }
 function wavFormat(track, segment) {
   const f = track?.format;
   if (!f || !Number.isInteger(f.sampleRate) || f.sampleRate < 8000 || f.sampleRate > 192000 ||
-      !Number.isInteger(f.channels) || f.channels < 1 || f.channels > 8 || !Number.isSafeInteger(segment.sampleCount)) fail();
+      !Number.isInteger(f.channels) || f.channels < 1 || f.channels > 8 || !Number.isSafeInteger(segment.sampleCount)) invalid('track-format-shape');
   const encoding = new Map([['pcm', 'pcm'], ['Pcm', 'pcm'], ['ieeefloat', 'ieeefloat'],
     ['IeeeFloat', 'ieeefloat'], ['extensible', 'extensible'], ['Extensible', 'extensible']]).get(f.encoding);
   let format;
   if (encoding === 'pcm' || (encoding === 'extensible' && String(f.subFormat).toLowerCase() === '00000001-0000-0010-8000-00aa00389b71')) format = 'pcm';
   if (encoding === 'ieeefloat' || (encoding === 'extensible' && String(f.subFormat).toLowerCase() === '00000003-0000-0010-8000-00aa00389b71')) format = 'float';
-  if (!format || (format === 'float' ? f.bitsPerSample !== 32 : ![8, 16, 24, 32].includes(f.bitsPerSample))) fail();
+  if (!format || (format === 'float' ? f.bitsPerSample !== 32 : ![8, 16, 24, 32].includes(f.bitsPerSample))) invalid('track-encoding');
   return { sampleRate: f.sampleRate, channels: f.channels, bitsPerSample: f.bitsPerSample, format, frames: segment.sampleCount };
 }
 // One shape for a window object whether it is registered mid-call or sealed after the call.
@@ -88,12 +98,12 @@ function windowObject(sessionId, w, index) {
 async function uploadInventory(dir, id, validated, signal) {
   const { manifest, fingerprint, derived } = validated;
   const durationMs = derived.sampleCount / 16;
-  if (durationMs > 7200000) fail('too-long', 'Cloud transcription currently supports calls up to two hours. Local audio is safe.');
-  if (!Array.isArray(manifest.segments) || !Array.isArray(manifest.tracks)) fail();
+  if (durationMs > 7200000) fail('too-long', 'Cloud transcription currently supports calls up to two hours. Local audio is safe.', 'call-over-two-hours');
+  if (!Array.isArray(manifest.segments) || !Array.isArray(manifest.tracks)) invalid('source-manifest-shape');
   const files = [];
   for (const segment of manifest.segments) {
     if (segment.status !== 'finalised') continue;
-    if (segment.byteLength > MAX_UPLOAD || segment.byteLength < 44) fail('size', 'An original checkpoint exceeds the cloud upload limit.');
+    if (segment.byteLength > MAX_UPLOAD || segment.byteLength < 44) fail('size', 'An original checkpoint exceeds the cloud upload limit.', 'segment-over-upload-cap');
     await hashFile(dir, segment.relativePath, segment, signal);
     files.push({ relativePath: segment.relativePath, object: {
       id: stableId(id, fingerprint, segment.relativePath), kind: 'original', sha256: segment.sha256.toLowerCase(),
@@ -104,9 +114,9 @@ async function uploadInventory(dir, id, validated, signal) {
     files.push({ relativePath: derived.windows[i].relativePath, object: windowObject(id, derived.windows[i], i) });
   }
   if (files.length > 8192 || !files.some(f => f.object.kind === 'original') ||
-      files.reduce((n, f) => n + f.object.byteLength, 0) > 4294967296) fail('size', 'Recording inventory exceeds the cloud limit.');
+      files.reduce((n, f) => n + f.object.byteLength, 0) > 4294967296) fail('size', 'Recording inventory exceeds the cloud limit.', 'inventory-over-limit');
   const sealed = { version: 1, sessionId: id.toLowerCase(), durationMs, objects: files.map(f => f.object) };
-  if (Buffer.byteLength(JSON.stringify(sealed)) > 4 * 1024 * 1024) fail('size', 'Recording inventory exceeds the cloud limit.');
+  if (Buffer.byteLength(JSON.stringify(sealed)) > 4 * 1024 * 1024) fail('size', 'Recording inventory exceeds the cloud limit.', 'inventory-json-over-limit');
   return { sealed, files };
 }
 module.exports = { validateDerived, validateLiveManifest, uploadInventory, windowObject, stableId, MAX_LIVE_WINDOWS };

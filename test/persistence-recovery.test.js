@@ -75,7 +75,7 @@ test('a delayed preference write cannot overwrite a subsequent opt-out', async t
   const enable = store.setPreference(true);
   const disable = store.setPreference(false);
   await Promise.all([enable, disable]);
-  assert.deepEqual(await store.preference(), { enabled: false });
+  assert.deepEqual(await store.preference(), { enabled: false, liveCalls: false });
 });
 
 function processor() {

@@ -38,6 +38,12 @@ internal sealed partial class RecorderEngine : IDisposable
 
     public event EventHandler<RecorderStatus>? StatusChanged;
 
+    public static string HelperVersion { get; } =
+        typeof(RecorderEngine).Assembly.GetName().Version?.ToString() ?? "unknown";
+
+    // Desktop build label passed on the command line; "unknown" when launched by hand.
+    public string? AppBuild { get; init; }
+
     public DeviceList ListDevices() => devices.List();
 
     public RecorderStatus Start(StartRequest request)
@@ -58,6 +64,9 @@ internal sealed partial class RecorderEngine : IDisposable
             currentSessionPath = Path.GetFullPath(request.SessionPath);
             activeSegmentDurationMs = request.SegmentDurationMs;
             sessionOriginTicks = clock.NowTicks;
+            DeviceList? devicesAtStart = null;
+            try { devicesAtStart = devices.List(); }
+            catch { /* Diagnostic only; a device enumeration hiccup must not stop a recording. */ }
             store = new SessionStore(currentSessionPath, new SessionManifest
             {
                 SessionId = request.SessionId,
@@ -67,6 +76,8 @@ internal sealed partial class RecorderEngine : IDisposable
                 ManifestVersion = 2,
                 TimelineOriginTicks = sessionOriginTicks,
                 CaptureGeneration = fence.Generation,
+                Producer = new ProducerInfo(AppBuild ?? "unknown", HelperVersion, Protocol.Version),
+                DevicesAtStart = devicesAtStart,
             });
             sessionCancellation = new CancellationTokenSource();
 
@@ -429,6 +440,7 @@ internal sealed partial class RecorderEngine : IDisposable
             manifestTrack.Message = status.Message;
             manifestTrack.DefaultRoles = status.DefaultRoles;
             manifestTrack.Generation = track.Generation;
+            manifestTrack.Counters = status.Counters;
         }
         store.SetState(
             state,

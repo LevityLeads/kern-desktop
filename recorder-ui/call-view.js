@@ -56,13 +56,23 @@ window.createCallView = function createCallView({ api, reportError }) {
     el['sign-in'].hidden = !['auth-required', 'sign-in-required', 'needs-auth'].includes(state)
       && !['auth-required', 'unauthorized'].includes(call.error?.code);
     // Diagnostics are text only; transcripts never become HTML or chat commands.
+    // Everything needed to diagnose a bad recording from one paste: which build produced it,
+    // what each track counted, how many chunks each track wrote, and the exact failed check.
+    const segmentsByTrack = {};
+    for (const segment of diagnostics?.segments || []) {
+      if (segment?.status !== 'finalised' || typeof segment.trackId !== 'string') continue;
+      segmentsByTrack[segment.trackId] = (segmentsByTrack[segment.trackId] || 0) + 1;
+    }
     el['call-diagnostics'].textContent = JSON.stringify({
+      producer: diagnostics?.producer || null,
       state: selected.state, durationMs: selected.durationMs, trackCount: selected.trackCount,
-      segmentCount: selected.segmentCount, captureFailure: selected.failure || null,
+      segmentCount: selected.segmentCount, segmentsByTrack, captureFailure: selected.failure || null,
       processingState: state, progress: call.progress ?? null, error: call.error || null,
       processingStage: call.processingStage || null, errorCode: call.errorCode || null,
+      errorReason: call.errorReason || null, errorOperation: call.errorOperation || null,
       warnings: call.warnings || [],
       tracks: diagnostics?.tracks || [], gaps: diagnostics?.gaps || [],
+      devicesAtStart: diagnostics?.devicesAtStart || null,
     }, null, 2);
   }
 
