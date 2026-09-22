@@ -18,9 +18,10 @@ const STORAGE = 'https://store.example.org';
 const RATE = 16000, CORE = 60 * RATE, OVERLAP = RATE, TICKS = 10_000_000, ORIGIN_TICKS = 1234567;
 
 function sha(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
-// realpath: the processor resolves call directories through realpath, and the Windows runner's
-// temp dir is a short-name path (RUNNER~1), so an unresolved expectation never matches there.
-function tmp() { return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kern-live-'))); }
+// The processor resolves call directories through fs.promises.realpath (libuv-native), which expands
+// Windows 8.3 short names (RUNNER~1 on the CI runner). The JS realpathSync does not, so only the
+// native variant produces the same string the processor hands to the helper.
+function tmp() { return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kern-live-'))); }
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
