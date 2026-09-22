@@ -27,7 +27,7 @@ test('supervisor status carries the build label and it survives helper status me
   const supervisor = new RecorderSupervisor({ recordingsRoot: os.tmpdir(), helperPath: '/helper', platform: 'linux',
     buildInfo: readBuildInfo({ version: '1.1.0-capture.20', kernBuild: { sha: '1e09e1e' } }) });
   assert.equal(supervisor.snapshot().build, '1.1.0-capture.20+1e09e1e');
-  supervisor._setStatus({ state: 'recording', build: 'spoofed-by-helper' });
+  supervisor._set({ state: 'recording', build: 'spoofed-by-helper' });
   assert.equal(supervisor.snapshot().build, '1.1.0-capture.20+1e09e1e');
   assert.equal(supervisor.snapshot().state, 'recording');
 });

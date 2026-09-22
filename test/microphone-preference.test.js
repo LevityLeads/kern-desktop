@@ -26,8 +26,8 @@ test('microphone preference persists explicit endpoint and explicit default acro
   assert.throws(() => failed.set(selected), /could not be saved/);
 });
 
-test('microphone preference IPC uses same strict selection validation as Start', () => {
-  assert.deepEqual(validateRendererPayload(IPC.GET_MICROPHONE), {});
+test('microphone preference IPC uses the same strict selection validation the helper start uses', () => {
+  assert.deepEqual(validateRendererPayload(IPC.GET_SETUP), {});
   assert.deepEqual(validateRendererPayload(IPC.SET_MICROPHONE, { mode:'device', deviceId:'fifine' }), { mode:'device', deviceId:'fifine' });
   for (const payload of [{mode:'selected'}, {mode:'default',deviceId:'airpods'}, {mode:'device',deviceId:'bad\0'}, {mode:'default',extra:true}]) {
     assert.throws(() => validateRendererPayload(IPC.SET_MICROPHONE, payload));

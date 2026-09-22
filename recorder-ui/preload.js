@@ -2,62 +2,65 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Sandboxed preload cannot import arbitrary modules. Keep this closed map in sync.
+// Sandboxed preload cannot import app modules. Keep this closed map in sync with
+// recorder/protocol.js (test/call-ipc.test.js checks that it is).
 const IPC = Object.freeze({
   STATUS: 'kern-recorder:status',
+  CALLS_CHANGED: 'kern-recorder:calls-changed',
+  OPEN_CALL: 'kern-recorder:open-call',
   GET_STATUS: 'kern-recorder:get-status',
-  GET_MICROPHONE: 'kern-recorder:get-microphone',
-  SET_MICROPHONE: 'kern-recorder:set-microphone',
+  GET_SETUP: 'kern-recorder:get-setup',
   LIST_DEVICES: 'kern-recorder:list-devices',
-  LIST_SESSIONS: 'kern-recorder:list-sessions',
-  GET_SESSION: 'kern-recorder:get-session',
+  SET_MICROPHONE: 'kern-recorder:set-microphone',
+  SET_TRANSCRIPTION: 'kern-recorder:set-transcription',
+  ACKNOWLEDGE_NOTICE: 'kern-recorder:acknowledge-notice',
   START: 'kern-recorder:start',
   PAUSE: 'kern-recorder:pause',
   RESUME: 'kern-recorder:resume',
   SET_MIC_MUTED: 'kern-recorder:set-mic-muted',
   STOP: 'kern-recorder:stop',
-  RECOVER: 'kern-recorder:recover',
-  GET_PLAYBACK_URL: 'kern-recorder:get-playback-url',
-  EXPORT: 'kern-recorder:export',
-  SHOW_IN_FOLDER: 'kern-recorder:show-in-folder',
+  LIST_CALLS: 'kern-recorder:list-calls',
   GET_CALL: 'kern-recorder:get-call',
-  PREPARE_CALL: 'kern-recorder:prepare-call',
-  TRANSCRIBE: 'kern-recorder:transcribe',
-  EXPORT_TRANSCRIPT: 'kern-recorder:export-transcript',
+  RENAME_CALL: 'kern-recorder:rename-call',
+  RETRY_CALL: 'kern-recorder:retry-call',
+  DELETE_CALL: 'kern-recorder:delete-call',
   COPY_TRANSCRIPT: 'kern-recorder:copy-transcript',
-  GET_TRANSCRIPTION_ENABLED: 'kern-recorder:get-transcription-enabled',
-  SET_TRANSCRIPTION_ENABLED: 'kern-recorder:set-transcription-enabled',
+  COPY_DIAGNOSTICS: 'kern-recorder:copy-diagnostics',
+  OPEN_SUMMARY: 'kern-recorder:open-summary',
   SIGN_IN: 'kern-recorder:sign-in',
 });
 
+function subscribe(channel) {
+  return (listener) => {
+    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on(channel, wrapped);
+    return () => ipcRenderer.removeListener(channel, wrapped);
+  };
+}
+
 contextBridge.exposeInMainWorld('kernRecorder', Object.freeze({
   getStatus: () => ipcRenderer.invoke(IPC.GET_STATUS),
-  getMicrophone: () => ipcRenderer.invoke(IPC.GET_MICROPHONE),
-  setMicrophone: (selection) => ipcRenderer.invoke(IPC.SET_MICROPHONE, selection),
+  getSetup: () => ipcRenderer.invoke(IPC.GET_SETUP),
   listDevices: () => ipcRenderer.invoke(IPC.LIST_DEVICES),
-  listSessions: () => ipcRenderer.invoke(IPC.LIST_SESSIONS),
-  getSession: (sessionId) => ipcRenderer.invoke(IPC.GET_SESSION, { sessionId }),
-  start: (microphone) => ipcRenderer.invoke(IPC.START, { microphone, consentAcknowledged: true }),
+  setMicrophone: (selection) => ipcRenderer.invoke(IPC.SET_MICROPHONE, selection),
+  setTranscription: (enabled) => ipcRenderer.invoke(IPC.SET_TRANSCRIPTION, { enabled }),
+  acknowledgeNotice: () => ipcRenderer.invoke(IPC.ACKNOWLEDGE_NOTICE),
+  start: () => ipcRenderer.invoke(IPC.START),
   pause: () => ipcRenderer.invoke(IPC.PAUSE),
   resume: () => ipcRenderer.invoke(IPC.RESUME),
   setMicMuted: (muted) => ipcRenderer.invoke(IPC.SET_MIC_MUTED, { muted }),
   stop: () => ipcRenderer.invoke(IPC.STOP),
-  recover: (sessionId) => ipcRenderer.invoke(IPC.RECOVER, { sessionId }),
-  playbackUrl: (sessionId, trackId, segmentId) => ipcRenderer.invoke(IPC.GET_PLAYBACK_URL, { sessionId, trackId, segmentId }),
-  exportSession: (sessionId) => ipcRenderer.invoke(IPC.EXPORT, { sessionId }),
-  showInFolder: (sessionId) => ipcRenderer.invoke(IPC.SHOW_IN_FOLDER, { sessionId }),
+  listCalls: () => ipcRenderer.invoke(IPC.LIST_CALLS),
   getCall: (sessionId) => ipcRenderer.invoke(IPC.GET_CALL, { sessionId }),
-  prepareCall: (sessionId) => ipcRenderer.invoke(IPC.PREPARE_CALL, { sessionId }),
-  transcribe: (sessionId) => ipcRenderer.invoke(IPC.TRANSCRIBE, { sessionId }),
-  exportTranscript: (sessionId) => ipcRenderer.invoke(IPC.EXPORT_TRANSCRIPT, { sessionId }),
-  copyTranscript: (sessionId) => ipcRenderer.invoke(IPC.COPY_TRANSCRIPT, { sessionId }),
-  getTranscriptionEnabled: () => ipcRenderer.invoke(IPC.GET_TRANSCRIPTION_ENABLED),
-  setTranscriptionEnabled: (enabled) => ipcRenderer.invoke(IPC.SET_TRANSCRIPTION_ENABLED, { enabled }),
+  renameCall: (sessionId, title) => ipcRenderer.invoke(IPC.RENAME_CALL, { sessionId, title }),
+  retryCall: (sessionId) => ipcRenderer.invoke(IPC.RETRY_CALL, { sessionId }),
+  deleteCall: (sessionId) => ipcRenderer.invoke(IPC.DELETE_CALL, { sessionId }),
+  copyTranscript: (sessionId, format) => ipcRenderer.invoke(IPC.COPY_TRANSCRIPT, { sessionId, format }),
+  copyDiagnostics: (sessionId) => ipcRenderer.invoke(IPC.COPY_DIAGNOSTICS, { sessionId }),
+  openSummary: (sessionId) => ipcRenderer.invoke(IPC.OPEN_SUMMARY, { sessionId }),
   signIn: () => ipcRenderer.invoke(IPC.SIGN_IN),
-  onStatus: (listener) => {
-    if (typeof listener !== 'function') throw new TypeError('status listener must be a function');
-    const wrapped = (_event, status) => listener(status);
-    ipcRenderer.on(IPC.STATUS, wrapped);
-    return () => ipcRenderer.removeListener(IPC.STATUS, wrapped);
-  },
+  onStatus: subscribe(IPC.STATUS),
+  onCallsChanged: subscribe(IPC.CALLS_CHANGED),
+  onOpenCall: subscribe(IPC.OPEN_CALL),
 }));

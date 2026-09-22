@@ -2,416 +2,229 @@
 
 const { EventEmitter } = require('events');
 const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
-const { randomBytes } = require('crypto');
-const { HelperTransport } = require('./helper-transport');
-const { PROTOCOL_VERSION, isActiveState } = require('./protocol');
-const catalog = require('./session-catalog');
+const { HelperProcess } = require('./helper-process');
+const { LIVE_STATES: LIVE, SILENT_LEVELS: SILENT, normalizeHelperStatus } = require('./helper-status');
+const { COMMAND_TIMEOUTS: TIMEOUTS, Liveness, PING_INTERVAL_MS, PING_TIMEOUT_MS } = require('./liveness');
+const { PowerSaveGuard } = require('./power-policy');
+const power = require('./supervisor-power');
+const { isActiveState } = require('./protocol');
 const { readBuildInfo } = require('./build-info');
-
-const HELPER_CONNECT_TIMEOUT_MS = 7000;
-const HELPER_COMMAND_TIMEOUT_MS = 1000;
-const HELPER_STOP_TIMEOUT_MS = 5000;
-const HEARTBEAT_INTERVAL_MS = 1000;
-const HEARTBEAT_GRACE_MS = 3500;
-
-function waitForExit(child, timeoutMs) {
-  return new Promise((resolve) => {
-    if (!child || child.exitCode !== null) return resolve(true);
-    const timer = setTimeout(() => {
-      child.off('exit', onExit);
-      resolve(false);
-    }, timeoutMs);
-    const onExit = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('exit', onExit);
-  });
-}
+const catalog = require('./session-catalog');
 
 function redactError(error) {
   return {
-    code: typeof error?.code === 'string' ? error.code : 'capture-error',
+    code: typeof error?.code === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(error.code) ? error.code : 'capture-error',
     message: typeof error?.message === 'string' ? error.message.slice(0, 500) : 'Capture failed',
   };
 }
 
+function idleStatus(build) {
+  return { state: 'idle', sessionId: null, startedAtUtc: null, elapsedMs: 0, committedFrames: 0, micMuted: false,
+    playbackMode: null, levels: SILENT, sources: [], failure: null, warning: null, pausedBy: null, pending: null, build };
+}
+
+// Owns the capture helper process and the one recording it may be running.
+// Events: 'status' (every change), 'started' {sessionId, context}, 'ended' {sessionId, state, context, cutAtFrames}.
 class RecorderSupervisor extends EventEmitter {
-  constructor({
-    recordingsRoot,
-    helperPath,
-    platform = process.platform,
-    spawnProcess = spawn,
-    transportFactory = (options) => new HelperTransport(options),
-    powerSaveBlocker,
-    now = () => Date.now(),
-    buildInfo = readBuildInfo(),
-  }) {
+  constructor({ recordingsRoot, helperPath, platform = process.platform, launchHelper, powerSaveBlocker,
+    now = () => Date.now(), buildInfo = readBuildInfo() }) {
     super();
     this.recordingsRoot = recordingsRoot;
-    this.helperPath = helperPath;
-    this.buildInfo = buildInfo;
     this.platform = platform;
-    this.spawnProcess = spawnProcess;
-    this.transportFactory = transportFactory;
-    this.powerSaveBlocker = powerSaveBlocker;
     this.now = now;
-    this.child = null;
-    this.transport = null;
-    this.heartbeatTimer = null;
-    this.heartbeatInFlight = false;
-    this.powerSaveBlockerId = null;
-    this.lastHeartbeatAt = 0;
-    this.status = {
-      protocolVersion: PROTOCOL_VERSION,
-      build: this.buildInfo.label,
-      state: 'idle',
-      sessionId: null,
-      micMuted: false,
-      startedAtUtc: null,
-      effectiveElapsedMs: 0,
-      freeBytes: null,
-      tracks: [],
-      failure: null,
-      pendingCommand: null,
-    };
+    this.build = buildInfo.label;
+    this.launchHelper = launchHelper || (() => HelperProcess.launch({ helperPath, buildLabel: buildInfo.label, now }));
+    this.helper = null;
+    this.heartbeat = null;
+    this.pingInFlight = false;
+    this.liveness = new Liveness({ now });
+    this.suspendedAt = null;
+    this.cutAtFrames = null;
+    this.context = null;
+    this.endedSessions = new Set();
+    this.powerGuard = new PowerSaveGuard(powerSaveBlocker);
+    this.status = idleStatus(this.build);
   }
 
-  snapshot() {
-    return JSON.parse(JSON.stringify(this.status));
+  snapshot() { return structuredClone(this.status); }
+  isActive() { return isActiveState(this.status.state); }
+
+  // The capture of this call as it stands, or null when the helper is not capturing it. While
+  // starting, committedFrames is 0. While asleep (or just woken), audio past the moment the
+  // machine slept is held back: after a long sleep it is silence that will be trimmed off.
+  liveCapture(sessionId) {
+    const { state, committedFrames } = this.status;
+    if (sessionId !== this.status.sessionId || !isActiveState(state)) return null;
+    return { state, committedFrames: this.cutAtFrames === null ? committedFrames : Math.min(committedFrames, this.cutAtFrames) };
   }
 
-  _setStatus(patch) {
-    // Helper payloads never carry the build; it is owned here and must survive every merge.
-    this.status = { ...this.status, ...patch, build: this.buildInfo.label };
+  _set(patch) {
+    this.status = { ...this.status, ...patch, build: this.build };
     this.emit('status', this.snapshot());
   }
 
   _requireWindows() {
-    if (this.platform !== 'win32') {
-      const error = new Error('Computer audio capture is available only in the packaged Windows app');
-      error.code = 'windows-only';
-      throw error;
-    }
+    if (this.platform === 'win32') return;
+    throw Object.assign(new Error('Call recording works only in the Windows app'), { code: 'windows-only' });
   }
 
-  _requireTransport() {
-    if (!this.transport) throw new Error('Capture helper is not running');
-    return this.transport;
-  }
-
-  _startPowerBlocker() {
-    if (!this.powerSaveBlocker || this.powerSaveBlockerId !== null) return;
-    this.powerSaveBlockerId = this.powerSaveBlocker.start('prevent-app-suspension');
-  }
-
-  _stopPowerBlocker() {
-    if (!this.powerSaveBlocker || this.powerSaveBlockerId === null) return;
-    if (this.powerSaveBlocker.isStarted(this.powerSaveBlockerId)) {
-      this.powerSaveBlocker.stop(this.powerSaveBlockerId);
-    }
-    this.powerSaveBlockerId = null;
-  }
-
-  _resolveHelperPath() {
-    const helperPath = path.resolve(this.helperPath);
-    if (!fs.statSync(helperPath).isFile()) throw new Error('Bundled capture helper is missing');
-    return helperPath;
-  }
-
-  async _launch(sessionId) {
+  async _ensureHelper() {
+    if (this.helper) return this.helper;
     this._requireWindows();
-    if (this.child || this.transport) throw new Error('Capture helper is already running');
+    const helper = await this.launchHelper();
+    this.helper = helper;
+    helper.on('message', () => this.liveness.activity());
+    helper.on('event', (event, payload) => { if (event === 'status') this._applyHelperStatus(payload); });
+    helper.on('failure', (error) => this._helperFailed(helper, error));
+    this.liveness.reset();
+    this.heartbeat = setInterval(() => this._tick(), PING_INTERVAL_MS);
+    this.heartbeat.unref?.();
+    return helper;
+  }
 
-    fs.mkdirSync(this.recordingsRoot, { recursive: true, mode: 0o700 });
-    const pipeName = `kern-recorder-${randomBytes(16).toString('hex')}`;
-    const helperPath = this._resolveHelperPath();
-    const child = this.spawnProcess(helperPath, [
-      '--pipe', pipeName,
-      '--parent-pid', String(process.pid),
-      '--protocol', String(PROTOCOL_VERSION),
-      '--app-build', this.buildInfo.label,
-    ], {
-      windowsHide: true,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      shell: false,
-      env: { SystemRoot: process.env.SystemRoot || 'C:\\Windows' },
-    });
-    this.child = child;
-
-    let stderr = '';
-    let spawnError = null;
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk) => {
-      if (stderr.length < 4096) stderr += chunk.slice(0, 4096 - stderr.length);
-    });
-    child.once('error', (error) => {
-      spawnError = error;
-    });
-    child.once('exit', (code, signal) => {
-      if (this.child !== child) return;
-      const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
-      this._handleHelperFailure(new Error(`Capture helper exited (${signal || code})${detail}`));
-    });
-
-    const transport = this.transportFactory({ pipeName, requestTimeoutMs: HELPER_COMMAND_TIMEOUT_MS });
-    this.transport = transport;
-    transport.on('event', (event, payload) => this._handleHelperEvent(event, payload));
-    transport.on('failure', (error) => this._handleHelperFailure(error));
-
-    try {
-      await transport.connect(HELPER_CONNECT_TIMEOUT_MS);
-    } catch (error) {
-      await this._terminateHelper();
-      throw spawnError || error;
+  _tick() {
+    const helper = this.helper;
+    if (!helper) return;
+    if (this.liveness.check({ commandInFlight: helper.hasCommandInFlight() }) === 'hung') {
+      this._helperFailed(helper, Object.assign(new Error('The recorder stopped responding.'), { code: 'helper-hung' }));
+      return;
     }
+    if (this.pingInFlight) return;
+    this.pingInFlight = true;
+    // A slow ping is not a verdict; only the liveness clock decides.
+    helper.request('ping', {}, PING_TIMEOUT_MS).catch(() => {}).finally(() => { this.pingInFlight = false; });
+  }
 
-    this.lastHeartbeatAt = this.now();
-    this.heartbeatTimer = setInterval(() => this._heartbeat(), HEARTBEAT_INTERVAL_MS);
-    this.heartbeatTimer.unref?.();
-    return { sessionId };
+  _applyHelperStatus(payload) {
+    const next = normalizeHelperStatus(payload);
+    if (!next || next.state === 'idle' || next.sessionId !== this.status.sessionId) return;
+    const ended = next.state === 'stopped' || next.state === 'interrupted';
+    let { pausedBy, state } = this.status;
+    if (next.state === 'recording' && this.suspendedAt === null) pausedBy = null;
+    if (next.state === 'paused' && !pausedBy) pausedBy = 'user';
+    // A periodic status must not undo the "stopping" the user just asked for.
+    state = state === 'stopping' && !ended ? 'stopping' : next.state;
+    this._set({ ...next, state, pausedBy: ended ? null : pausedBy, levels: ended ? SILENT : next.levels });
+    if (ended) this._sessionEnded(next.sessionId, next.state);
+  }
+
+  _sessionEnded(sessionId, state) {
+    if (!sessionId || this.endedSessions.has(sessionId)) return;
+    this.endedSessions.add(sessionId);
+    this.powerGuard.release();
+    const detail = { sessionId, state, context: this.context, cutAtFrames: this.cutAtFrames };
+    this.context = null;
+    this.cutAtFrames = null;
+    this.emit('ended', detail);
+    this._releaseHelper();
+  }
+
+  _helperFailed(helper, error) {
+    if (helper !== this.helper) return;
+    this._detach();
+    helper.terminate();
+    if (!isActiveState(this.status.state) || this.status.state === 'starting') return;
+    this._set({ state: 'interrupted', failure: redactError(error), pending: null, levels: SILENT, pausedBy: null });
+    this._sessionEnded(this.status.sessionId, 'interrupted');
+  }
+
+  _detach() {
+    clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    this.helper = null;
+    this.pingInFlight = false;
+  }
+
+  async _releaseHelper() {
+    const helper = this.helper;
+    if (!helper) return;
+    this._detach();
+    await helper.shutdown();
   }
 
   async listDevices() {
-    this._requireWindows();
-    if (this.transport) return this.transport.request('list-devices');
-
-    await this._launch(null);
+    const helper = await this._ensureHelper();
     try {
-      return await this._requireTransport().request('list-devices', {}, 3000);
+      return await helper.request('list-devices', {}, TIMEOUTS.control);
     } finally {
-      await this._shutdownIdleHelper();
+      if (!this.isActive() && this.helper === helper) await this._releaseHelper();
     }
   }
 
-  listSessions() {
-    return catalog.listSessions(this.recordingsRoot);
-  }
-
-  getSession(sessionId) {
-    return catalog.readManifest(this.recordingsRoot, sessionId);
-  }
-
-  async start(payload) {
-    if (this.status.state !== 'idle' && this.status.state !== 'stopped' && this.status.state !== 'interrupted') {
-      throw new Error('A recording session is already active');
-    }
-
+  async start({ microphone, context = null }) {
+    if (this.isActive()) throw new Error('A recording is already running');
+    this._requireWindows();
     const sessionId = catalog.createSessionId();
     const sessionPath = catalog.sessionDirectory(this.recordingsRoot, sessionId);
-    this._setStatus({
-      state: 'starting',
-      sessionId,
-      micMuted: false,
-      startedAtUtc: new Date().toISOString(),
-      tracks: [],
-      failure: null,
-      pendingCommand: 'start',
-    });
-
+    fs.mkdirSync(this.recordingsRoot, { recursive: true, mode: 0o700 });
+    this.context = context;
+    this.cutAtFrames = null;
+    this._set({ ...idleStatus(this.build), state: 'starting', sessionId, pending: 'start' });
+    let sent = false;
     try {
-      await this._launch(sessionId);
-      const result = await this._requireTransport().request('start', {
-        sessionId,
-        sessionPath,
-        microphone: payload.microphone,
-        segmentDurationMs: 5000,
-      }, 5000);
-      this._startPowerBlocker();
-      this._setStatus({ ...result, state: result.state || 'recording', pendingCommand: null });
+      const helper = await this._ensureHelper();
+      sent = true;
+      this._applyHelperStatus(await helper.request('start', { sessionId, sessionPath, microphone }, TIMEOUTS.start));
+      if (!LIVE.has(this.status.state)) throw new Error('The recorder did not start.');
+      this._set({ pending: null });
+      this.powerGuard.hold();
+      this.emit('started', { sessionId, context });
       return this.snapshot();
     } catch (error) {
-      await this._terminateHelper();
-      this._setStatus({ state: 'interrupted', failure: redactError(error), pendingCommand: null });
+      const helper = this.helper;
+      if (helper) { this._detach(); await helper.terminate(); }
+      this._set({ ...idleStatus(this.build), failure: redactError(error) });
+      // The helper may have created the session before failing; the pipeline decides what is there.
+      if (sent) this._sessionEnded(sessionId, 'interrupted');
+      this.context = null;
       throw error;
     }
   }
 
-  _controlPayload(payload = {}) {
-    return {
-      ...payload,
-      requestedAtUnixMs: this.now(),
-      requestedAtMonotonicMs: Number(process.hrtime.bigint()) / 1_000_000,
-    };
+  _controlPayload(extra = {}) {
+    return { ...extra, requestedAtUnixMs: this.now(), requestedAtMonotonicMs: performance.now() + 1 };
   }
 
-  async _acknowledgedCommand(command, pendingState, successState, payload = {}) {
-    const transport = this._requireTransport();
-    if (!isActiveState(this.status.state)) throw new Error('No active recording session');
-    this._setStatus({ state: pendingState, pendingCommand: command });
+  // A rejected or slow command is reported to the caller. It never ends the recording: only
+  // the liveness clock or the helper itself can do that.
+  async _control(command, extra) {
+    const helper = this.helper;
+    if (!helper || !LIVE.has(this.status.state)) throw new Error('No recording is running');
+    this._set({ pending: command });
     try {
-      const result = await transport.request(
-        command,
-        this._controlPayload(payload),
-        HELPER_COMMAND_TIMEOUT_MS
-      );
-      this._setStatus({ ...result, state: result.state || successState, pendingCommand: null });
+      this._applyHelperStatus(await helper.request(command, this._controlPayload(extra), TIMEOUTS.control));
       return this.snapshot();
-    } catch (error) {
-      await this._interruptForUnacknowledgedCommand(command, error);
-      throw error;
-    }
-  }
-
-  pause() {
-    return this._acknowledgedCommand('pause', 'pausing', 'paused');
-  }
-
-  resume() {
-    return this._acknowledgedCommand('resume', 'resuming', 'recording');
-  }
-
-  setMicMuted(muted) {
-    return this._acknowledgedCommand(
-      muted ? 'mute-mic' : 'unmute-mic',
-      muted ? 'muting' : 'unmuting',
-      this.status.state === 'paused' ? 'paused' : 'recording',
-      { muted }
-    );
-  }
-
-  async stop() {
-    if (!this.transport) return this.snapshot();
-    this._setStatus({ state: 'stopping', pendingCommand: 'stop' });
-    try {
-      const result = await this.transport.request('stop', this._controlPayload(), HELPER_STOP_TIMEOUT_MS);
-      this._setStatus({ ...result, state: result.state || 'stopped', pendingCommand: null });
-      await this._shutdownIdleHelper();
-      return this.snapshot();
-    } catch (error) {
-      await this._interruptForUnacknowledgedCommand('stop', error);
-      throw error;
     } finally {
-      this._stopPowerBlocker();
+      if (this.status.pending === command) this._set({ pending: null });
     }
   }
 
-  async suspend() {
-    if (!this.transport || !isActiveState(this.status.state)) return;
+  pause() { return this._control('pause'); }
+  resume() { return this._control('resume'); }
+  setMicMuted(muted) { return this._control(muted ? 'mute-mic' : 'unmute-mic', { muted }); }
+
+  async stop({ reason } = {}) {
+    const helper = this.helper;
+    if (!helper || !LIVE.has(this.status.state)) return this.snapshot();
+    const { sessionId } = this.status;
+    this._set({ state: 'stopping', pending: 'stop' });
     try {
-      const result = await this.transport.request('suspend', this._controlPayload(), HELPER_COMMAND_TIMEOUT_MS);
-      this._setStatus({ ...result, state: 'suspended', pendingCommand: null });
+      this._applyHelperStatus(await helper.request('stop', this._controlPayload(reason ? { reason } : {}), TIMEOUTS.stop));
     } catch (error) {
-      await this._interruptForUnacknowledgedCommand('suspend', error);
-    }
-  }
-
-  async recover(sessionId) {
-    if (this.transport) throw new Error('Stop the active recording before recovery');
-    const manifest = catalog.readManifest(this.recordingsRoot, sessionId);
-    if (manifest.state === 'stopped' || manifest.state === 'interrupted') return manifest;
-
-    await this._launch(sessionId);
-    try {
-      const manifest = await this.transport.request('recover', {
-        sessionId,
-        sessionPath: catalog.sessionDirectory(this.recordingsRoot, sessionId),
-      }, HELPER_STOP_TIMEOUT_MS);
-      return manifest;
+      // Unconfirmed stop: everything already in audio.pcm is intact, so end the session here.
+      if (this.helper === helper) { this._detach(); await helper.terminate(); }
+      this._set({ state: 'interrupted', failure: redactError(error), levels: SILENT, pausedBy: null });
+      this._sessionEnded(sessionId, 'interrupted');
     } finally {
-      await this._shutdownIdleHelper();
+      this._set({ pending: null });
     }
+    return this.snapshot();
   }
 
-  async shutdownForQuit() {
-    if (this.transport && isActiveState(this.status.state)) {
-      try {
-        await this.transport.request(
-          'stop',
-          this._controlPayload({ reason: 'application-quit' }),
-          HELPER_STOP_TIMEOUT_MS
-        );
-      } catch {
-        // Parent-watchdog and process termination remain the final fence.
-      }
-    }
-    await this._terminateHelper();
-    this._stopPowerBlocker();
-  }
-
-  async _interruptForUnacknowledgedCommand(command, error) {
-    await this._terminateHelper();
-    this._stopPowerBlocker();
-    this._setStatus({
-      state: 'interrupted',
-      pendingCommand: null,
-      failure: {
-        code: 'unacknowledged-command',
-        message: `Capture helper did not acknowledge ${command}: ${error.message}`,
-      },
-    });
-  }
-
-  _handleHelperEvent(event, payload) {
-    if (event === 'status') {
-      this._setStatus(payload || {});
-    } else if (event === 'heartbeat') {
-      this.lastHeartbeatAt = this.now();
-    } else if (event === 'failure') {
-      this._handleHelperFailure(Object.assign(new Error(payload?.message || 'Capture helper failed'), {
-        code: payload?.code,
-      }));
-    }
-  }
-
-  async _heartbeat() {
-    if (!this.transport || this.heartbeatInFlight) return;
-    if (this.now() - this.lastHeartbeatAt > HEARTBEAT_GRACE_MS) {
-      await this._handleHelperFailure(new Error('Capture helper heartbeat stopped'));
-      return;
-    }
-    this.heartbeatInFlight = true;
-    try {
-      await this.transport.request('ping', {}, 900);
-      this.lastHeartbeatAt = this.now();
-    } catch (error) {
-      await this._handleHelperFailure(error);
-    } finally {
-      this.heartbeatInFlight = false;
-    }
-  }
-
-  async _handleHelperFailure(error) {
-    if (!this.child && !this.transport) return;
-    const wasActive = isActiveState(this.status.state);
-    await this._terminateHelper();
-    this._stopPowerBlocker();
-    if (wasActive) {
-      this._setStatus({ state: 'interrupted', pendingCommand: null, failure: redactError(error) });
-    }
-  }
-
-  async _shutdownIdleHelper() {
-    if (this.transport) {
-      try {
-        await this.transport.request('shutdown', {}, 1000);
-      } catch {
-        // The process is terminated below if graceful shutdown fails.
-      }
-    }
-    await this._terminateHelper();
-  }
-
-  async _terminateHelper(force = true) {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = null;
-    const transport = this.transport;
-    const child = this.child;
-    this.transport = null;
-    this.child = null;
-    transport?.close();
-    if (!child) return;
-    const exited = await waitForExit(child, 750);
-    if (!exited && force && child.exitCode === null) child.kill();
-  }
+  // Sleep, wake and quit live in supervisor-power.js; these delegate so callers see one object.
+  onSystemSuspend() { power.onSystemSuspend(this); }
+  onSystemResume() { return power.onSystemResume(this); }
+  shutdownForQuit(options) { return power.shutdownForQuit(this, options); }
 }
 
-module.exports = {
-  HELPER_COMMAND_TIMEOUT_MS,
-  HEARTBEAT_GRACE_MS,
-  RecorderSupervisor,
-  redactError,
-  waitForExit,
-};
+module.exports = { RecorderSupervisor, TIMEOUTS, redactError };

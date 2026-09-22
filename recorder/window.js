@@ -4,15 +4,15 @@ const path = require('path');
 
 function createRecorderWindow({ BrowserWindow, appRoot, parent }) {
   const window = new BrowserWindow({
-    width: 760,
-    height: 720,
-    minWidth: 680,
-    minHeight: 600,
+    width: 640,
+    height: 760,
+    minWidth: 480,
+    minHeight: 560,
     parent: parent || undefined,
     modal: false,
     show: false,
     title: 'Kern recorder',
-    backgroundColor: '#0a0614',
+    backgroundColor: '#1c1c1c',
     icon: path.join(appRoot, 'assets', 'icon.png'),
     webPreferences: {
       contextIsolation: true,

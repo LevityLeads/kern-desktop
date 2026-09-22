@@ -57,7 +57,7 @@ test('transport retries while a newly spawned helper creates its named pipe', as
       return socket;
     },
   });
-  transport.request = async () => ({ protocolVersion: 1 });
+  transport.request = async () => ({ protocolVersion: 2 });
 
   await transport.connect(500);
 
@@ -80,4 +80,33 @@ test('transport does not retry a permanent pipe connection error', async () => {
 
   await assert.rejects(transport.connect(500), (error) => error.code === 'EACCES');
   assert.equal(attempts, 1);
+});
+
+test('any helper frame counts as activity, and only non-ping commands count as in flight', async () => {
+  let now = 1000;
+  const socket = new EventEmitter();
+  socket.destroyed = false;
+  socket.destroy = () => { socket.destroyed = true; };
+  const written = [];
+  socket.write = (frame) => { written.push(JSON.parse(frame.subarray(4).toString('utf8'))); return true; };
+  const transport = new HelperTransport({ pipeName: 'activity', now: () => now });
+  transport.socket = socket;
+  transport._bindSocket(socket);
+  let activity = 0;
+  transport.on('message', () => { activity += 1; });
+
+  const ping = transport.request('ping', {}, 5000);
+  assert.equal(transport.hasCommandInFlight(), false);
+  const start = transport.request('start', {}, 20000);
+  assert.equal(transport.hasCommandInFlight(), true);
+  now += 21000;
+  assert.equal(transport.hasCommandInFlight(), false, 'a command past its own timeout no longer shields the helper');
+
+  socket.emit('data', encodeMessage({ type: 'event', protocolVersion: 2, event: 'status', payload: {} }));
+  socket.emit('data', encodeMessage({ type: 'response', protocolVersion: 2, requestId: written[0].requestId, ok: true, result: { protocolVersion: 2 } }));
+  socket.emit('data', encodeMessage({ type: 'response', protocolVersion: 2, requestId: written[1].requestId, ok: true, result: {} }));
+  await Promise.all([ping, start]);
+  assert.equal(activity, 3);
+  assert.deepEqual(written.map((message) => message.protocolVersion), [2, 2]);
+  transport.close();
 });

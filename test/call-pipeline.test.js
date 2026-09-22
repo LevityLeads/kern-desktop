@@ -1,31 +1,256 @@
 'use strict';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { EventEmitter } = require('node:events');
-const { CallProcessing } = require('../recorder/call-processing');
+const { CallHttp } = require('../recorder/call-http');
+const { CallPipeline } = require('../recorder/call-pipeline');
+const { MAX_DELAY_MS } = require('../recorder/retry-policy');
+const { ORIGIN, OTHER_REMOTE, REMOTE, SESSION, appendFrames, fakeKern, json, tempRoot, writeSession } = require('./helpers');
 
-const id = '9b918241-3cb0-447c-8861-8f14358563e7';
-test('fresh missing-derived recording reaches render and retains safe stage diagnostics', async t => {
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'kern-pipeline-'));
-  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
-  const dir=path.join(root,id);fs.mkdirSync(dir);
-  fs.writeFileSync(path.join(dir,'manifest.json'),JSON.stringify({sessionId:id,protocolVersion:1,state:'stopped',tracks:[],segments:[]}));
-  let rendered=false;
-  const processor=new CallProcessing({recordingsRoot:root,helperPath:'/helper',getSession:()=>null,getOrigin:()=>null,
-    settingsPath:path.join(root,'settings.json'),spawnProcess:()=>{
-      rendered=true;const child=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};
-      setImmediate(()=>child.emit('close',20));return child;
-    }});
-  t.after(()=>processor.stop());
-  await processor.onStopped(id);
-  await processor.running;
-  const result=await processor.getCall(id);
-  assert.equal(rendered,true);
-  assert.equal(result.state,'failed');
-  assert.equal(result.processingStage,'render-audio');
-  assert.equal(result.errorCode,'render-validation');
-  assert.ok(!result.error.includes(root));
+const OTHER = '0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a';
+
+// A pipeline on a temp folder, a fake Kern, manual timers and a controllable "helper".
+function harness(t, { kern = fakeKern(), root = tempRoot(t) } = {}) {
+  let capture = null;
+  let clock = 1_000_000;
+  const completed = [];
+  const http = new CallHttp({ getSession: () => kern.session, getOrigin: () => ORIGIN, fetchImpl: kern.upload });
+  const pipeline = new CallPipeline({
+    root, http, defaultTranscribe: () => true, now: () => clock,
+    live: (id) => (capture?.sessionId === id ? { committedFrames: capture.committedFrames } : null),
+    setTimer: (fn, ms) => ({ fn, ms }), clearTimer: () => {},
+  });
+  pipeline.on('complete', ({ sessionId }) => completed.push(sessionId));
+  return {
+    root, kern, pipeline, completed,
+    capture(sessionId, committedFrames) { capture = sessionId ? { sessionId, committedFrames } : null; },
+    advance(ms) { clock += ms; },
+    delay: (id) => pipeline.timers.get(id)?.ms ?? null,
+    // Runs the scheduled pass for a call, as its timer would.
+    async fire(id = SESSION) {
+      const timer = pipeline.timers.get(id);
+      assert.ok(timer, `no pass scheduled for ${id}`);
+      timer.fn();
+      await pipeline.locks.get(id);
+    },
+    state: (id = SESSION) => JSON.parse(fs.readFileSync(path.join(root, id, 'call.json'), 'utf8')),
+  };
+}
+
+function transcriptFor(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    window_index: index,
+    transcript: { adapter: 'groq-whisper-v2', silent: false, text: `Me: hello ${index}`, error: null,
+      utterances: [{ speaker: index % 2 ? 'them' : 'me', startMs: index * 60000 + 100, endMs: index * 60000 + 900, text: `line ${index}` }] },
+  }));
+}
+
+test('live call: windows publish during the call, the rest after stop, then transcript lands and audio is deleted', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { state: 'recording', frames: 130000 * 16 });
+  h.capture(SESSION, 130000 * 16);
+  await h.pipeline.onStarted(SESSION, { transcribe: true });
+  await h.fire();
+  assert.deepEqual([...h.kern.windows.keys()], [0, 1]);
+  assert.equal(h.kern.uploaded.size, 2);
+  assert.equal(h.delay(SESSION), 5000);
+  // Every window was registered before its upload permission was asked for.
+  const calls = h.kern.calls.filter(c => /windows|upload/.test(c)).map(c => c.split('/').pop());
+  assert.deepEqual(calls, ['windows', 'upload', 'windows', 'upload']);
+
+  appendFrames(h.root, 130000 * 16, 500 * 16 + 5);
+  h.capture(null);
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true } });
+  // Stop-and-quit waits on exactly this: the final length is on disk once onEnded resolves.
+  assert.equal(h.state().finalFrames, 130500 * 16);
+  await h.fire();
+  assert.equal(h.kern.finalized.durationMs, 130500);
+  assert.deepEqual(h.kern.finalized.objects.map(o => [o.windowIndex, o.startMs, o.endMs]),
+    [[0, 0, 61000], [1, 59000, 121000], [2, 119000, 130500]]);
+  assert.equal(h.kern.puts.length, 3);
+  assert.equal(h.state().stage, 'transcribing');
+
+  h.kern.state = 'complete';
+  h.kern.transcripts = transcriptFor(3);
+  await h.fire();
+  const done = h.state();
+  assert.equal(done.stage, 'complete');
+  assert.equal(done.transcript.windows.length, 3);
+  assert.equal(done.audioDeleted, true);
+  assert.equal(fs.existsSync(path.join(h.root, SESSION, 'audio.pcm')), false);
+  assert.equal(fs.existsSync(path.join(h.root, SESSION, 'session.json')), true);
+  assert.deepEqual(h.completed, [SESSION]);
+});
+
+test('restart mid-call resumes where it stopped: no window is sent twice', async (t) => {
+  const first = harness(t);
+  writeSession(first.root, { state: 'recording', frames: 70000 * 16 });
+  first.capture(SESSION, 70000 * 16);
+  await first.pipeline.onStarted(SESSION, { transcribe: true });
+  await first.fire();
+  assert.equal(first.kern.uploaded.size, 1);
+
+  appendFrames(first.root, 70000 * 16, 130000 * 16);
+  const second = harness(t, { kern: first.kern, root: first.root });
+  second.capture(SESSION, 200000 * 16);
+  await second.pipeline.run(SESSION);
+  const counts = {};
+  for (const put of first.kern.puts) counts[put.objectId] = (counts[put.objectId] || 0) + 1;
+  assert.deepEqual(Object.values(counts), [1, 1, 1]);
+  assert.equal(second.state().windows.length, 3);
+});
+
+test('restart mid-upload: a registered window is re-sent identically; a lost acknowledgement counts as uploaded', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { state: 'recording', frames: 125000 * 16 });
+  h.capture(SESSION, 125000 * 16);
+  let failed = 0;
+  // Window 1: the bytes reach storage but the reply is lost.
+  h.kern.failUpload = (objectId) => {
+    if (h.kern.windows.get(1)?.id !== objectId || failed++) return null;
+    h.kern.uploaded.add(objectId);
+    throw new TypeError('socket hang up');
+  };
+  await h.pipeline.onStarted(SESSION, { transcribe: true });
+  await h.fire();
+  const interrupted = h.state();
+  assert.deepEqual(interrupted.windows.map(w => [w.registered, w.uploaded]), [[true, true], [true, false]]);
+  assert.equal(interrupted.error.retry, true);
+
+  const restarted = harness(t, { kern: h.kern, root: h.root });
+  restarted.capture(SESSION, 125000 * 16);
+  await restarted.pipeline.run(SESSION);
+  const after = restarted.state();
+  assert.deepEqual(after.windows.map(w => w.uploaded), [true, true]);
+  assert.equal(after.windows[1].id, interrupted.windows[1].id);
+  assert.equal(after.error, null);
+});
+
+test('launch: a session left "recording" by a crash is settled from its file size and finalized', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { state: 'recording', frames: 90250 * 16 + 9 });
+  await h.pipeline.start();
+  await h.fire();
+  const state = h.state();
+  assert.equal(state.endReason, 'interrupted');
+  assert.equal(state.finalFrames, 90250 * 16);
+  assert.equal(h.kern.finalized.durationMs, 90250);
+  assert.equal(h.kern.finalized.objects.length, 2);
+  assert.equal(state.stage, 'transcribing');
+});
+
+test('transient failures back off to five minutes and never give up; online retries at once', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { frames: 30000 * 16 });
+  let down = true;
+  h.kern.fail = () => (down ? json({ error: 'unavailable' }, 503) : null);
+  await h.pipeline.start();
+  const delays = [];
+  for (let i = 0; i < 12; i += 1) { await h.fire(); delays.push(h.delay(SESSION)); }
+  assert.deepEqual(delays.slice(0, 4), [2000, 4000, 8000, 16000]);
+  assert.equal(Math.max(...delays), MAX_DELAY_MS);
+  assert.equal(delays.at(-1), MAX_DELAY_MS);
+  assert.equal(h.state().attempts, 12);
+  assert.equal(h.state().stage, 'publishing');
+  down = false;
+  h.pipeline.kick();
+  assert.equal(h.delay(SESSION), 0);
+  await h.fire();
+  assert.equal(h.state().stage, 'transcribing');
+  assert.equal(h.state().error, null);
+  assert.equal(h.state().attempts, 0);
+});
+
+test('signed out: the call waits as sign-in-required and resumes by itself after sign-in', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { frames: 30000 * 16 });
+  let signedIn = false;
+  h.kern.fail = (_method, pathname) => (!signedIn && pathname === '/api/calls/identity' ? json({ error: 'unauthorized' }, 401) : null);
+  await h.pipeline.start();
+  await h.fire();
+  assert.equal(h.state().stage, 'sign-in-required');
+  assert.equal(h.state().error.code, 'auth');
+  signedIn = true;
+  h.pipeline.kick();
+  await h.fire();
+  assert.equal(h.state().stage, 'transcribing');
+  assert.equal(h.state().error, null);
+});
+
+test('a call Kern failed to transcribe is retried through POST /retry', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { frames: 30000 * 16 });
+  await h.pipeline.start();
+  h.kern.fail = (method, pathname) => (method === 'GET' && pathname === `/api/calls/${REMOTE}` && h.kern.finalized
+    ? json({ id: REMOTE, state: 'failed' }) : null);
+  await h.fire();
+  assert.equal(h.state().stage, 'failed');
+  assert.equal(h.state().cloudFailed, true);
+  assert.equal(h.delay(SESSION), null);
+  h.kern.fail = null;
+  await h.pipeline.retry(SESSION);
+  assert.equal(h.kern.retried, 1);
+  await h.fire();
+  assert.equal(h.state().stage, 'transcribing');
+  assert.equal(h.state().cloudFailed, false);
+});
+
+test('calls are independent: one stuck call does not hold up another', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { id: OTHER, frames: 30000 * 16 });
+  writeSession(h.root, { frames: 30000 * 16 });
+  h.kern.fail = (_method, pathname) => (pathname.includes(OTHER_REMOTE) ? new Promise(() => {}) : null);
+  await h.pipeline.start();
+  h.pipeline.timers.get(OTHER).fn();
+  await h.fire(SESSION);
+  assert.equal(h.state().stage, 'transcribing');
+  assert.equal(h.state(OTHER).stage, 'publishing');
+});
+
+test('a long sleep trims the call back to when the machine went to sleep', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { frames: 20 * 60000 * 16 });
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true }, cutAtFrames: 5 * 60000 * 16 + 9 });
+  assert.equal(h.state().finalFrames, 5 * 60000 * 16);
+});
+
+test('a call recorded with transcription off stays local until asked', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { frames: 30000 * 16 });
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: false } });
+  await h.fire();
+  assert.equal(h.state().stage, 'local');
+  assert.equal(h.kern.calls.length, 0);
+  await h.pipeline.retry(SESSION);
+  await h.fire();
+  assert.equal(h.state().stage, 'transcribing');
+});
+
+test('a start that failed before any audio leaves no folder behind', async (t) => {
+  const h = harness(t);
+  fs.mkdirSync(path.join(h.root, SESSION));
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true } });
+  assert.equal(fs.existsSync(path.join(h.root, SESSION)), false);
+});
+
+test('stop and quit mid-upload: uploads are cancelled at once and the final length is still saved', async (t) => {
+  const h = harness(t);
+  writeSession(h.root, { state: 'recording', frames: 70000 * 16 });
+  h.capture(SESSION, 70000 * 16);
+  // Kern hangs on the window registration until the request is aborted.
+  h.kern.fail = (_method, pathname, _body, init) => (pathname.endsWith('/windows')
+    ? new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))) : null);
+  await h.pipeline.onStarted(SESSION, { transcribe: true });
+  h.pipeline.timers.get(SESSION).fn();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  h.capture(null);
+  const ended = h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true } });
+  const started = Date.now();
+  await h.pipeline.close({ timeoutMs: 5000 });
+  await ended;
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(h.state().finalFrames, 70000 * 16);
+  assert.equal(h.state().error, null, 'a cancellation is not recorded as a failure');
 });

@@ -5,7 +5,9 @@ const net = require('net');
 const { PROTOCOL_VERSION, isPlainObject } = require('./protocol');
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
-const REQUEST_TIMEOUT_MS = 1000;
+// Default for commands without their own budget. The supervisor passes explicit timeouts.
+const REQUEST_TIMEOUT_MS = 5000;
+const HELLO_TIMEOUT_MS = 5000;
 const STARTUP_RETRY_DELAY_MS = 50;
 const TRANSIENT_STARTUP_ERRORS = new Set(['ENOENT', 'ECONNREFUSED', 'EBUSY']);
 
@@ -59,14 +61,25 @@ class FrameDecoder {
 }
 
 class HelperTransport extends EventEmitter {
-  constructor({ pipeName, socketFactory = net.createConnection, requestTimeoutMs = REQUEST_TIMEOUT_MS }) {
+  constructor({ pipeName, socketFactory = net.createConnection, requestTimeoutMs = REQUEST_TIMEOUT_MS, now = Date.now }) {
     super();
     this.pipeName = pipeName;
     this.socketFactory = socketFactory;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.now = now;
     this.socket = null;
     this.pending = new Map();
     this.nextRequestId = 1;
+  }
+
+  // True while a command other than ping is waiting for its reply and is still inside its own
+  // timeout. A slow command (start can take seconds) is not evidence of a hung helper.
+  hasCommandInFlight() {
+    const now = this.now();
+    for (const pending of this.pending.values()) {
+      if (pending.command !== 'ping' && pending.deadline > now) return true;
+    }
+    return false;
   }
 
   async connect(timeoutMs = 5000) {
@@ -95,7 +108,7 @@ class HelperTransport extends EventEmitter {
     }
     this._bindSocket(this.socket);
 
-    const hello = await this.request('hello', { protocolVersion: PROTOCOL_VERSION }, 2000);
+    const hello = await this.request('hello', { protocolVersion: PROTOCOL_VERSION }, HELLO_TIMEOUT_MS);
     if (hello.protocolVersion !== PROTOCOL_VERSION) {
       this.close();
       throw new Error(`Capture helper protocol ${hello.protocolVersion} is incompatible`);
@@ -147,6 +160,8 @@ class HelperTransport extends EventEmitter {
   }
 
   _receive(message) {
+    // Any frame at all proves the helper is alive; the supervisor's liveness clock listens here.
+    this.emit('message');
     if (message.type === 'event' && typeof message.event === 'string') {
       this.emit('event', message.event, message.payload);
       return;
@@ -184,7 +199,7 @@ class HelperTransport extends EventEmitter {
         error.code = 'helper-timeout';
         reject(error);
       }, timeoutMs);
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { resolve, reject, timer, command, deadline: this.now() + timeoutMs });
       this.socket.write(encodeMessage({
         type: 'request',
         protocolVersion: PROTOCOL_VERSION,

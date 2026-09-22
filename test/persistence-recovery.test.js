@@ -5,9 +5,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { writeJson, writeJsonWithRetry, readJson } = require('../recorder/atomic-json');
-const { CallProcessing } = require('../recorder/call-processing');
-const { CallState, fresh } = require('../recorder/call-state');
-const id = '9b918241-3cb0-447c-8861-8f14358563e7';
 const denied = (code = 'EPERM', syscall = 'rename') => Object.assign(new Error('private path omitted'), { code, syscall });
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-persistence-'));
@@ -61,72 +58,4 @@ test('retry revalidates destination before replacing it', async t => {
     fs.unlinkSync(file); fs.mkdirSync(file);
   } }), /regular/);
   assert.equal(fs.statSync(file).isDirectory(), true);
-});
-
-test('a delayed preference write cannot overwrite a subsequent opt-out', async t => {
-  const { root, file } = fixture(t);
-  const store = new CallState(root, file);
-  const rename = fs.renameSync;
-  let refused = false;
-  t.mock.method(fs, 'renameSync', (...args) => {
-    if (!refused) { refused = true; throw denied(); }
-    return rename(...args);
-  });
-  const enable = store.setPreference(true);
-  const disable = store.setPreference(false);
-  await Promise.all([enable, disable]);
-  assert.deepEqual(await store.preference(), { enabled: false, liveCalls: false });
-});
-
-function processor() {
-  return new CallProcessing({ recordingsRoot: '/unused', helperPath: '/unused',
-    settingsPath: '/unused', getOrigin: () => 'https://kern.example.org', getSession: () => null });
-}
-
-test('failed state save is visible without durable error state and never uploads', async () => {
-  const p = processor();
-  const state = { ...fresh(id), state: 'preparing', preparePending: true };
-  p.store.load = async () => structuredClone(state);
-  p.store.directory = async () => '/unused';
-  let saves = 0, network = 0;
-  p.store.save = async () => { saves++; throw denied(); };
-  p.http.api = async () => { network++; throw new Error('must not upload'); };
-  p.queue.add(id);
-  await p.drain();
-  const result = await p.getCall(id);
-  assert.equal(result.state, 'failed');
-  assert.equal(result.processingStage, 'save-processing-state');
-  assert.equal(result.errorCode, 'EPERM');
-  assert.equal(result.errorOperation, 'rename');
-  assert.doesNotMatch(result.error, /Original audio is safe|private path/);
-  assert.equal(saves, 2);
-  assert.equal(network, 0);
-  p.store.save = async () => {};
-  await p.save(state);
-  assert.equal(p.failures.size, 0);
-  await p.stop();
-});
-
-test('original lookup error survives a second failure saving error state', async () => {
-  const p = processor();
-  p.store.load = async () => fresh(id);
-  p.store.directory = async () => { throw denied('EACCES', 'lstat'); };
-  p.store.save = async () => { throw denied(); };
-  p.queue.add(id); await p.drain();
-  const result = await p.getCall(id);
-  assert.equal(result.processingStage, 'locate-recording');
-  assert.equal(result.errorOperation, 'lstat');
-  assert.equal(result.errorCode, 'EACCES');
-  await p.stop();
-});
-
-test('unreadable processing state emits a visible failure without granting consent', async () => {
-  const p = processor();
-  p.store.load = async () => { throw denied('EACCES', 'open'); };
-  p.queue.add(id); await p.drain();
-  const result = await p.getCall(id);
-  assert.equal(result.state, 'failed');
-  assert.equal(result.processingStage, 'load-processing-state');
-  assert.equal(result.playbackUrl, null);
-  await p.stop();
 });

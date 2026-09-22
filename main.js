@@ -11,17 +11,18 @@ const {
   powerMonitor,
   powerSaveBlocker,
   Notification,
+  clipboard,
+  net,
+  session,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { RecorderController } = require('./recorder/controller');
-const { isActiveState } = require('./recorder/protocol');
-const { RecorderSupervisor } = require('./recorder/supervisor');
+const { createDesktopRecorder } = require('./recorder/desktop-recorder');
 const { UpdateGuard } = require('./recorder/update-guard');
-const { CallProcessing } = require('./recorder/call-processing');
+const { withRecordingDot } = require('./recorder/tray-icon');
 
 // ------------------------------------------------------------------
 // Kern host resolution.
@@ -165,37 +166,13 @@ const store = new JsonStore({
 let mainWindow = null;
 let setupWindow = null;
 let tray = null;
-let recorderController = null;
-let recorderSupervisor = null;
-let callProcessing = null;
+let recorder = null;
 let updateGuard = null;
 let quitFinalising = false;
-let lastStartedSession = null;
-let lastStoppedSession = null;
-
-async function handleCaptureLifecycle(status) {
-  if (!callProcessing || !status || !status.sessionId) return;
-  const id = status.sessionId;
-  if (isActiveState(status.state) && lastStartedSession !== id) {
-    lastStartedSession = id;
-    try {
-      // Snapshot cloud-transcription consent at capture start, never retroactively.
-      const snapshot = await callProcessing.snapshotStartConsent();
-      await callProcessing.onStarted(id, snapshot);
-    } catch (error) { console.error('Call start hook failed:', error.message); }
-  }
-  if ((status.state === 'stopped' || status.state === 'interrupted') && lastStoppedSession !== id) {
-    lastStoppedSession = id;
-    callProcessing.onStopped(id).catch((error) => console.error('Call stop hook failed:', error.message));
-  }
-}
-
-function callSettingsPath() {
-  return path.join(app.getPath('userData'), 'call-settings.json');
-}
+let trayIcons = null;
 
 function recordingIsActive() {
-  return recorderSupervisor ? isActiveState(recorderSupervisor.status.state) : false;
+  return recorder ? recorder.isActive() : false;
 }
 
 function recordingsRoot() {
@@ -210,12 +187,28 @@ function bundledHelperPath() {
 }
 
 function showRecorder() {
-  recorderController?.show();
+  recorder?.show();
 }
 
-function reportRecorderCommandFailure(command, error) {
-  console.error(`Recorder ${command} failed:`, error);
-  showRecorder();
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (kernUrl) createWindow();
+    else createSetupWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// Opens a Kern page (a call's summary thread) in the main Kern window. Only same-origin https
+// URLs are accepted; anything else is refused rather than opened.
+function openKernUrl(url) {
+  let target;
+  try { target = new URL(url); } catch { throw new Error('That summary link is invalid.'); }
+  if (!kernUrl || target.origin !== new URL(kernUrl).origin) throw new Error('That summary is not on your Kern site.');
+  focusMainWindow();
+  mainWindow?.loadURL(target.href);
 }
 
 /**
@@ -475,6 +468,9 @@ function createWindow() {
   // Inject CSS to make body translucent so Mica bleeds through
   // ------------------------------------
   mainWindow.webContents.on('did-finish-load', () => {
+    // A page load may follow a sign-in; calls waiting on one retry now.
+    recorder?.signInMayHaveChanged();
+
     // Inject transparency + drag region + titlebar inset variable.
     // Override the opaque dark theme backgrounds so the Windows 11
     // Acrylic material bleeds through. Each layer needs its own
@@ -609,95 +605,50 @@ function createWindow() {
 }
 
 // ------------------------------------------------------------------
-// Local recorder
+// Local recorder (recorder/desktop-recorder.js owns the wiring)
 // ------------------------------------------------------------------
 function setupRecorder() {
-  const { MicrophonePreference } = require('./recorder/microphone-preference');
-  const microphonePreference = new MicrophonePreference(path.join(app.getPath('userData'), 'recorder-settings.json'));
-  recorderSupervisor = new RecorderSupervisor({
-    recordingsRoot: recordingsRoot(),
-    helperPath: bundledHelperPath(),
-    powerSaveBlocker,
-  });
-  callProcessing = new CallProcessing({
-    recordingsRoot: recordingsRoot(),
-    helperPath: bundledHelperPath(),
-    getSession: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.session : null),
-    getOrigin: () => kernUrl,
-    settingsPath: callSettingsPath(),
-  });
-  recorderController = new RecorderController({
-    BrowserWindow,
-    ipcMain,
-    supervisor: recorderSupervisor,
-    microphonePreference,
+  recorder = createDesktopRecorder({
+    electron: { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, session },
     appRoot: __dirname,
     recordingsRoot: recordingsRoot(),
-    getParentWindow: () => mainWindow,
-    callProcessing,
-    focusMain: () => {
-      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Open Kern to sign in');
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    },
+    userData: app.getPath('userData'),
+    helperPath: bundledHelperPath(),
+    getOrigin: () => kernUrl,
+    getMainWindow: () => mainWindow,
+    signIn: focusMainWindow,
+    openKernUrl,
   });
-  // The renderer polls getCall; a change event refreshes the tray/updater promptly.
-  callProcessing.on('change', () => updateTrayMenu());
-  callProcessing.start().catch((error) => console.error('Call processing resume failed:', error.message));
-  const { CaptureHealthAlerts, presentCaptureAlert } = require('./recorder/capture-health-alerts');
-  const healthAlerts = new CaptureHealthAlerts();
-  recorderSupervisor.on('status', (status) => {
-    updateGuard?.captureStateChanged();
-    updateTrayMenu();
-    handleCaptureLifecycle(status);
-    presentCaptureAlert(healthAlerts.update(status), {
-      showRecorder, Notification,
-      reportError: error => console.error('Recorder health alert failed:', error.message),
-    });
+  recorder.on('state', () => updateGuard?.captureStateChanged());
+  // Fires at most once a second (the tooltip clock); the menu and icon change only with state.
+  recorder.on('tray', ({ menuChanged, iconChanged, tooltip, recording }) => {
+    if (!tray) return;
+    tray.setToolTip(tooltip);
+    if (iconChanged && trayIcons) tray.setImage(recording ? trayIcons.recording : trayIcons.idle);
+    if (menuChanged) updateTrayMenu();
   });
 
   // Ctrl+Shift+R is the browser/Kern hard-refresh; use Ctrl+Alt+R so we never steal it.
   const shortcutRegistered = globalShortcut.register('CommandOrControl+Alt+R', () => showRecorder());
   if (!shortcutRegistered) console.error('Recorder shortcut Ctrl+Alt+R could not be registered.');
-  powerMonitor.on('suspend', () => {
-    recorderSupervisor.suspend().catch((error) => reportRecorderCommandFailure('suspend', error));
-  });
-  powerMonitor.on('resume', () => {
-    if (recorderSupervisor.status.state === 'suspended') showRecorder();
-  });
 }
 
 // ------------------------------------------------------------------
 // System tray
 // ------------------------------------------------------------------
 function recorderTrayTemplate() {
-  const status = recorderSupervisor?.snapshot();
-  const active = status && isActiveState(status.state);
+  if (!recorder) return [];
   return [
-    {
-      label: active ? `Recorder: ${status.state}` : 'Open recorder',
-      click: () => showRecorder(),
-    },
-    {
-      label: status?.state === 'paused' ? 'Resume recording' : 'Pause recording',
-      enabled: Boolean(active && !status.pendingCommand && status.state !== 'stopping'),
-      click: () => {
-        const command = status.state === 'paused' ? 'resume' : 'pause';
-        recorderSupervisor[command]().catch((error) => reportRecorderCommandFailure(command, error));
-      },
-    },
-    {
-      label: 'Stop recording',
-      enabled: Boolean(active && status.state !== 'stopping'),
-      click: () => {
-        recorderSupervisor.stop().catch((error) => reportRecorderCommandFailure('stop', error));
-      },
-    },
+    ...recorder.trayItems().map((item) => ({
+      label: item.label,
+      enabled: item.enabled !== false,
+      click: item.action ? () => recorder.runTrayAction(item.action) : undefined,
+    })),
     { type: 'separator' },
   ];
 }
 
+// Rebuilt only when the recorder's menu actually changes (see recorder/tray-model.js).
 function updateTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -723,6 +674,10 @@ function updateTrayMenu() {
 function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'icon.png');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+  const size = icon.getSize();
+  const recordingIcon = icon.isEmpty() ? icon
+    : nativeImage.createFromBitmap(withRecordingDot(icon.toBitmap(), size.width, size.height), size);
+  trayIcons = { idle: icon, recording: recordingIcon };
   tray = new Tray(icon);
 
   tray.setToolTip('Kern');
@@ -739,11 +694,11 @@ function createTray() {
 async function requestQuit() {
   if (quitFinalising) return;
   if (recordingIsActive()) {
-    const result = await dialog.showMessageBox(recorderController?.window || mainWindow, {
+    const result = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
       title: 'Stop recording and quit?',
       message: 'Kern is still recording.',
-      detail: 'Quitting stops capture and finalises every durable segment before the app closes.',
+      detail: 'Quitting stops the recording. Everything recorded so far is saved and transcribed the next time Kern opens.',
       buttons: ['Keep recording', 'Stop and quit'],
       defaultId: 0,
       cancelId: 0,
@@ -754,8 +709,10 @@ async function requestQuit() {
 
   quitFinalising = true;
   try {
-    await recorderSupervisor?.shutdownForQuit();
-    await callProcessing?.stop();
+    // Awaited: the stop and the call's final length are saved before the app exits.
+    await recorder?.shutdownForQuit();
+  } catch (error) {
+    console.error('Recorder shutdown failed:', error);
   } finally {
     app.isQuitting = true;
     app.quit();
@@ -822,5 +779,5 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  recorderController?.destroy();
+  recorder?.destroy();
 });

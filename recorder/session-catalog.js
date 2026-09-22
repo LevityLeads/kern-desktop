@@ -1,215 +1,120 @@
 'use strict';
 
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { pathToFileURL } = require('url');
-const { assertSessionId } = require('./protocol');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { assertSessionId, isPlainObject } = require('./protocol');
+const { CallError, safePath, readJsonFile, fileSize } = require('./safe-fs');
 
-const MANIFEST_NAME = 'manifest.json';
-const JOURNAL_NAME = 'journal.ndjson';
-const COMPLETE_STATES = new Set(['stopped', 'interrupted']);
+// <Documents>/Kern Recordings/<uuid>/
+//   session.json   written by the helper (capture v2), read-only here
+//   audio.pcm      interleaved int16 stereo 16 kHz, append-only, deleted once the transcript is stored
+//   call.json      the desktop's own processing state (call-store.js)
+// Older v1 recordings have manifest.json (+ processing.json) instead and are listed read-only.
+const FILES = Object.freeze({
+  SESSION: 'session.json', AUDIO: 'audio.pcm', CALL: 'call.json',
+  V1_MANIFEST: 'manifest.json', V1_STATE: 'processing.json',
+});
+const FRAME_BYTES = 4;
+const DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SESSION_STATES = new Set(['recording', 'paused', 'stopped', 'interrupted']);
+const MAX_SESSION_BYTES = 1024 * 1024;
+const MAX_V1_MANIFEST_BYTES = 32 * 1024 * 1024;
+const MAX_V1_STATE_BYTES = 8 * 1024 * 1024;
 
-function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function ensureInside(root, candidate) {
-  const resolvedRoot = path.resolve(root);
-  const resolvedCandidate = path.resolve(candidate);
-  if (resolvedCandidate !== resolvedRoot && !resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new Error('Resolved path escapes the recording root');
-  }
-  return resolvedCandidate;
-}
+function createSessionId() { return crypto.randomUUID(); }
 
 function sessionDirectory(root, sessionId) {
-  return ensureInside(root, path.join(root, assertSessionId(sessionId)));
+  return path.join(path.resolve(root), assertSessionId(sessionId));
 }
 
-function manifestPath(root, sessionId) {
-  return path.join(sessionDirectory(root, sessionId), MANIFEST_NAME);
+async function listSessionIds(root) {
+  let entries;
+  try { entries = await fs.promises.readdir(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  return entries.filter(entry => entry.isDirectory() && DIR_NAME.test(entry.name)).map(entry => entry.name);
 }
 
-function readManifest(root, sessionId) {
-  const file = assertUnlinkedPath(root, manifestPath(root, sessionId));
-  const manifest = readJson(file);
-  if (manifest.sessionId !== sessionId || manifest.protocolVersion !== 1) {
-    throw new Error('Recording manifest identity or protocol does not match');
+async function sessionDir(root, sessionId) {
+  const dir = await safePath(root, assertSessionId(sessionId));
+  if (!(await fs.promises.lstat(dir)).isDirectory()) throw new CallError('invalid-path', 'Recording folder is missing.');
+  return dir;
+}
+
+function validDate(value) {
+  return typeof value === 'string' && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+
+function validateSession(doc, sessionId) {
+  if (!isPlainObject(doc) || doc.format !== 'kern-call-audio/1' || typeof doc.sessionId !== 'string' ||
+      doc.sessionId.toLowerCase() !== sessionId || !SESSION_STATES.has(doc.state) || !validDate(doc.startedAtUtc) ||
+      !(doc.endedAtUtc === null || validDate(doc.endedAtUtc)) || doc.sampleRate !== 16000 || doc.channels !== 2 ||
+      !Number.isSafeInteger(doc.committedFrames) || doc.committedFrames < 0) {
+    throw new CallError('invalid-session', 'This recording\'s session.json is damaged.');
   }
-  return manifest;
+  const failure = isPlainObject(doc.failure) && typeof doc.failure.message === 'string'
+    ? { code: String(doc.failure.code || 'capture-error').slice(0, 64), message: doc.failure.message.slice(0, 500) } : null;
+  return { sessionId, state: doc.state, startedAtUtc: doc.startedAtUtc, endedAtUtc: doc.endedAtUtc,
+    committedFrames: doc.committedFrames, failure };
 }
 
-function readJournal(root, sessionId) {
-  const filePath = path.join(sessionDirectory(root, sessionId), JOURNAL_NAME);
-  let body;
+// The validated session.json, or null when the helper never wrote one.
+async function readSession(root, sessionId) {
+  const dir = await sessionDir(root, sessionId);
+  let doc;
+  try { doc = await readJsonFile(dir, FILES.SESSION, MAX_SESSION_BYTES); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  return validateSession(doc, sessionId);
+}
+
+// Committed frames on disk: the file length is the authority, not session.json.
+async function audioFrames(root, sessionId) {
+  const size = await fileSize(await sessionDir(root, sessionId), FILES.AUDIO);
+  return size === null ? null : Math.floor(size / FRAME_BYTES);
+}
+
+async function audioPath(root, sessionId) {
+  return safePath(await sessionDir(root, sessionId), FILES.AUDIO);
+}
+
+// A v1 recording: shown in the list with its stored transcript, never processed.
+async function readLegacy(root, sessionId) {
+  const dir = await sessionDir(root, sessionId);
+  const legacy = { sessionId, startedAtUtc: null, durationMs: 0, transcript: null };
   try {
-    body = fs.readFileSync(filePath, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return [];
-    throw error;
-  }
-
-  const endsWithNewline = body.endsWith('\n');
-  const lines = body.split('\n');
-  const records = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line) continue;
-    try {
-      records.push(JSON.parse(line));
-    } catch {
-      const isIncompleteTail = index === lines.length - 1 && !endsWithNewline;
-      if (isIncompleteTail) break;
-      throw new Error(`Invalid journal record at line ${index + 1}`);
-    }
-  }
-  return records;
+    const manifest = await readJsonFile(dir, FILES.V1_MANIFEST, MAX_V1_MANIFEST_BYTES);
+    if (!isPlainObject(manifest) || manifest.protocolVersion !== 1 || manifest.sessionId !== sessionId) return legacy;
+    if (validDate(manifest.startedAtUtc)) legacy.startedAtUtc = manifest.startedAtUtc;
+    if (Number.isSafeInteger(manifest.durationMs) && manifest.durationMs > 0) legacy.durationMs = manifest.durationMs;
+  } catch { return legacy; }
+  try {
+    const state = await readJsonFile(dir, FILES.V1_STATE, MAX_V1_STATE_BYTES);
+    if (isPlainObject(state) && state.sessionId === sessionId && isPlainObject(state.transcript)) legacy.transcript = state.transcript;
+  } catch { /* no stored transcript */ }
+  return legacy;
 }
 
-function listSessions(root) {
-  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  const sessions = [];
-
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/i.test(entry.name)) continue;
-    try {
-      const manifest = readManifest(root, entry.name);
-      const finalisedSegments = Array.isArray(manifest.segments)
-        ? manifest.segments.filter((segment) => segment.status === 'finalised').length
-        : 0;
-      sessions.push({
-        sessionId: manifest.sessionId,
-        state: manifest.state,
-        startedAtUtc: manifest.startedAtUtc,
-        endedAtUtc: manifest.endedAtUtc || null,
-        durationMs: manifest.durationMs || 0,
-        sizeBytes: manifest.sizeBytes || 0,
-        trackCount: Array.isArray(manifest.tracks) ? manifest.tracks.length : 0,
-        segmentCount: finalisedSegments,
-        recoverable: !COMPLETE_STATES.has(manifest.state),
-        failure: manifest.failure || null,
-      });
-    } catch (error) {
-      sessions.push({
-        sessionId: entry.name,
-        state: 'quarantined',
-        recoverable: false,
-        failure: { code: 'invalid-manifest', message: error.message },
-      });
-    }
-  }
-
-  return sessions.sort((a, b) => String(b.startedAtUtc || '').localeCompare(String(a.startedAtUtc || '')));
+// 'v2' (session.json), 'v1' (manifest.json) or 'none' (an empty folder from a start that failed).
+async function sessionKind(root, sessionId) {
+  const dir = await sessionDir(root, sessionId);
+  if ((await fileSize(dir, FILES.SESSION)) !== null) return 'v2';
+  if ((await fileSize(dir, FILES.V1_MANIFEST)) !== null) return 'v1';
+  if ((await fileSize(dir, FILES.CALL)) !== null || (await fileSize(dir, FILES.AUDIO)) > 0) return 'v2';
+  return 'none';
 }
 
-function findSegment(manifest, trackId, segmentId) {
-  if (!Array.isArray(manifest.segments)) throw new Error('Manifest has no segment catalog');
-  const segment = manifest.segments.find(
-    (candidate) =>
-      candidate.status === 'finalised' &&
-      candidate.trackId === trackId &&
-      candidate.segmentId === segmentId
-  );
-  if (!segment) throw new Error('Finalised recording segment was not found');
-  return segment;
+async function deleteAudio(root, sessionId) {
+  const file = await safePath(await sessionDir(root, sessionId), FILES.AUDIO, true);
+  await fs.promises.rm(file, { force: true, maxRetries: 3, retryDelay: 200 });
 }
 
-function assertUnlinkedPath(root, candidate) {
-  const target = ensureInside(root, candidate);
-  let current = path.resolve(root);
-  const parts = path.relative(current, target).split(path.sep).filter(Boolean);
-  for (const part of [null, ...parts]) {
-    if (part !== null) current = path.join(current, part);
-    if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Recording path contains a symlink');
-    ensureInside(fs.realpathSync(root), fs.realpathSync(current));
-  }
-  return target;
-}
-
-function resolveFinalisedSegmentFile(sessionRoot, segment) {
-  if (typeof segment.relativePath !== 'string' || path.isAbsolute(segment.relativePath)) {
-    throw new Error('Invalid recording relative path');
-  }
-  const filePath = assertUnlinkedPath(sessionRoot, path.join(sessionRoot, segment.relativePath));
-  const stat = fs.statSync(filePath);
-  if (!stat.isFile()) throw new Error('Recording segment is not a file');
-  if (!Number.isSafeInteger(segment.byteLength) || segment.byteLength <= 0 || stat.size !== segment.byteLength) {
-    throw new Error('Recording segment byte length does not match its manifest');
-  }
-  if (typeof segment.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(segment.sha256)) {
-    throw new Error('Recording segment checksum is invalid');
-  }
-  const checksum = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-  const expected = Buffer.from(segment.sha256, 'hex');
-  const actual = Buffer.from(checksum, 'hex');
-  if (!crypto.timingSafeEqual(actual, expected)) {
-    throw new Error('Recording segment checksum does not match its manifest');
-  }
-  return filePath;
-}
-
-function resolveSegment(root, payload) {
-  const manifest = readManifest(root, payload.sessionId);
-  const segment = findSegment(manifest, payload.trackId, payload.segmentId);
-  const sessionRoot = sessionDirectory(root, payload.sessionId);
-  const filePath = resolveFinalisedSegmentFile(sessionRoot, segment);
-  return { manifest, segment, filePath };
-}
-
-function buildPlaybackUrl(root, payload) {
-  const { filePath } = resolveSegment(root, payload);
-  return pathToFileURL(filePath).toString();
-}
-
-function copyFileExclusive(source, destination) {
-  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-}
-
-function exportSession(root, sessionId, destinationRoot) {
-  const manifest = readManifest(root, sessionId);
-  fs.mkdirSync(destinationRoot, { recursive: true });
-  const timestamp = String(manifest.startedAtUtc || new Date().toISOString()).replace(/[:.]/g, '-');
-  let target = path.join(destinationRoot, `Kern recording ${timestamp}`);
-  for (let suffix = 2; fs.existsSync(target); suffix += 1) {
-    target = path.join(destinationRoot, `Kern recording ${timestamp} (${suffix})`);
-  }
-  fs.mkdirSync(target, { mode: 0o700 });
-
-  const sourceRoot = sessionDirectory(root, sessionId);
-  for (const segment of manifest.segments || []) {
-    if (segment.status !== 'finalised') continue;
-    const source = resolveFinalisedSegmentFile(sourceRoot, segment);
-    const destination = ensureInside(target, path.join(target, segment.relativePath));
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    copyFileExclusive(source, destination);
-  }
-  copyFileExclusive(manifestPath(root, sessionId), path.join(target, MANIFEST_NAME));
-
-  const journalSource = path.join(sourceRoot, JOURNAL_NAME);
-  if (fs.existsSync(journalSource)) {
-    assertUnlinkedPath(sourceRoot, journalSource);
-    copyFileExclusive(journalSource, path.join(target, JOURNAL_NAME));
-  }
-  return target;
-}
-
-function createSessionId() {
-  return crypto.randomUUID();
+// Removes a whole recording folder. rm does not follow links, and safePath refused them anyway.
+async function removeSession(root, sessionId) {
+  const dir = await sessionDir(root, sessionId);
+  await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
 }
 
 module.exports = {
-  COMPLETE_STATES,
-  MANIFEST_NAME,
-  JOURNAL_NAME,
-  buildPlaybackUrl,
-  createSessionId,
-  ensureInside,
-  exportSession,
-  listSessions,
-  manifestPath,
-  readJournal,
-  readManifest,
-  resolveSegment,
-  sessionDirectory,
+  FILES, FRAME_BYTES, audioFrames, audioPath, createSessionId, deleteAudio, listSessionIds, readLegacy,
+  readSession, removeSession, sessionDir, sessionDirectory, sessionKind, validateSession,
 };

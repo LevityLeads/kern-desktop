@@ -3,156 +3,90 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const crypto = require('node:crypto');
-const {
-  buildPlaybackUrl,
-  exportSession,
-  listSessions,
-  readJournal,
-  readManifest,
-  resolveSegment,
-} = require('../recorder/session-catalog');
+const catalog = require('../recorder/session-catalog');
+const { CallPipeline } = require('../recorder/call-pipeline');
+const { CallService } = require('../recorder/call-service');
+const { fresh } = require('../recorder/call-store');
+const { SESSION, tempRoot, writeSession } = require('./helpers');
 
-function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-catalog-'));
-  const sessionId = crypto.randomUUID();
-  const sessionPath = path.join(root, sessionId);
-  const segmentPath = path.join(sessionPath, 'segments', 'microphone-abc', '000000-segment.wav');
-  fs.mkdirSync(path.dirname(segmentPath), { recursive: true });
-  fs.writeFileSync(segmentPath, Buffer.from('RIFF fake fixture'));
-  const segmentBytes = fs.readFileSync(segmentPath);
-  const manifest = {
-    protocolVersion: 1,
-    manifestVersion: 1,
-    sessionId,
-    state: 'stopped',
-    startedAtUtc: '2026-09-15T12:00:00.000Z',
-    endedAtUtc: '2026-09-15T12:01:00.000Z',
-    durationMs: 60000,
-    sizeBytes: fs.statSync(segmentPath).size,
-    tracks: [{ trackId: 'microphone-abc', name: 'Test mic' }],
-    segments: [{
-      segmentId: 'segment',
-      trackId: 'microphone-abc',
-      sequence: 0,
-      relativePath: 'segments/microphone-abc/000000-segment.wav',
-      status: 'finalised',
-      byteLength: segmentBytes.length,
-      sha256: crypto.createHash('sha256').update(segmentBytes).digest('hex'),
-    }],
-  };
-  fs.writeFileSync(path.join(sessionPath, 'manifest.json'), JSON.stringify(manifest));
-  fs.writeFileSync(path.join(sessionPath, 'journal.ndjson'), '{"eventName":"session-started"}\n');
-  return { root, sessionId, segmentPath, manifest };
+const V1 = '9b918241-3cb0-447c-8861-8f14358563e7';
+const BROKEN_V1 = '11111111-2222-4333-8444-555555555555';
+const DAMAGED = '66666666-7777-4888-9999-aaaaaaaaaaaa';
+
+function service(root, status = { state: 'idle', sessionId: null }) {
+  const pipeline = new CallPipeline({ root, http: null, live: () => null, setTimer: () => null, clearTimer: () => {} });
+  const supervisor = { status, snapshot: () => ({ ...status, levels: {}, build: 'test' }) };
+  return new CallService({ root, pipeline, supervisor });
 }
 
-test('catalog lists and reads valid sessions', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
+function writeV1(root) {
+  const dir = path.join(root, V1);
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ sessionId: V1, protocolVersion: 1, state: 'stopped',
+    startedAtUtc: '2026-09-15T09:00:00.000Z', durationMs: 1320000, tracks: [], segments: [] }));
+  fs.writeFileSync(path.join(dir, 'processing.json'), JSON.stringify({ version: 1, sessionId: V1, state: 'complete',
+    transcript: { text: 'Me: old call\nThem: still readable', segments: [] } }));
+  const broken = path.join(root, BROKEN_V1);
+  fs.mkdirSync(broken);
+  fs.writeFileSync(path.join(broken, 'manifest.json'), '{ not json');
+}
 
-  assert.equal(listSessions(data.root)[0].segmentCount, 1);
-  assert.equal(readManifest(data.root, data.sessionId).sessionId, data.sessionId);
-});
+test('older v1 recordings list read-only with their stored transcript; broken ones do not crash the list', async (t) => {
+  const root = tempRoot(t);
+  writeV1(root);
+  writeSession(root, { frames: 30000 * 16 });
+  fs.writeFileSync(path.join(root, SESSION, 'call.json'), JSON.stringify({ ...fresh(SESSION, { transcribe: true }), stage: 'complete',
+    finalFrames: 30000 * 16, transcript: { windows: [{ index: 0, text: '', utterances: [{ speaker: 'me', startMs: 0, endMs: 900, text: 'new' }] }] } }));
+  writeSession(root, { id: DAMAGED, frames: 16000 });
+  fs.writeFileSync(path.join(root, DAMAGED, 'call.json'), '{"version":2,"sessionId":"nope"}');
+  fs.mkdirSync(path.join(root, 'not-a-session'));
 
-test('segment resolution never trusts renderer paths', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
-
-  const resolved = resolveSegment(data.root, {
-    sessionId: data.sessionId,
-    trackId: 'microphone-abc',
-    segmentId: 'segment',
-  });
-  assert.equal(resolved.filePath, data.segmentPath);
-  assert.match(buildPlaybackUrl(data.root, {
-    sessionId: data.sessionId,
-    trackId: 'microphone-abc',
-    segmentId: 'segment',
-  }), /^file:/);
-});
-
-test('export copies only catalogued finalised segments', (context) => {
-  const data = fixture();
-  const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-export-'));
-  context.after(() => {
-    fs.rmSync(data.root, { recursive: true, force: true });
-    fs.rmSync(destination, { recursive: true, force: true });
-  });
-
-  const exported = exportSession(data.root, data.sessionId, destination);
-  assert.deepEqual(fs.readdirSync(exported).sort(), [
-    'journal.ndjson',
-    'manifest.json',
-    'segments',
+  const calls = await service(root).list();
+  assert.deepEqual(calls.map(c => [c.sessionId, c.chip.label]), [
+    [SESSION, 'Ready'], [DAMAGED, 'Failed'], [V1, 'Older recording'], [BROKEN_V1, 'Older recording'],
   ]);
-  const exportedManifest = JSON.parse(fs.readFileSync(path.join(exported, 'manifest.json'), 'utf8'));
-  for (const segment of exportedManifest.segments) {
-    const bytes = fs.readFileSync(path.join(exported, segment.relativePath));
-    assert.equal(bytes.length, segment.byteLength);
-    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), segment.sha256);
-  }
+  assert.equal(calls.find(c => c.sessionId === V1).durationMs, 1320000);
+
+  const old = await service(root).get(V1);
+  assert.equal(old.legacy, true);
+  assert.equal(old.canRename, false);
+  assert.deepEqual(old.items.map(i => [i.speaker, i.text]), [['me', 'old call'], ['them', 'still readable']]);
+  const broken = await service(root).get(BROKEN_V1);
+  assert.deepEqual(broken.items, []);
+  assert.equal(await catalog.sessionKind(root, V1), 'v1');
 });
 
-test('journal reader ignores only an incomplete final record', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
-  const journal = path.join(data.root, data.sessionId, 'journal.ndjson');
-  fs.appendFileSync(journal, '{"eventName":"unfinished"');
-
-  assert.deepEqual(readJournal(data.root, data.sessionId), [{ eventName: 'session-started' }]);
+test('session.json is validated; the audio file length is the authority on committed frames', async (t) => {
+  const root = tempRoot(t);
+  writeSession(root, { state: 'recording', frames: 1000, extraBytes: 3 });
+  const session = await catalog.readSession(root, SESSION);
+  assert.equal(session.state, 'recording');
+  assert.equal(await catalog.audioFrames(root, SESSION), 1000);
+  const file = path.join(root, SESSION, 'session.json');
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), sampleRate: 48000 }));
+  await assert.rejects(catalog.readSession(root, SESSION), (error) => error.code === 'invalid-session');
 });
 
-test('journal reader rejects a malformed complete record', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
-  const journal = path.join(data.root, data.sessionId, 'journal.ndjson');
-  fs.appendFileSync(journal, '{bad-json}\n');
-
-  assert.throws(() => readJournal(data.root, data.sessionId), /line 2/);
+test('links inside a recording folder are refused', { skip: process.platform === 'win32' }, async (t) => {
+  const root = tempRoot(t);
+  writeSession(root, { frames: 16 });
+  const outside = path.join(root, 'outside.pcm');
+  fs.writeFileSync(outside, Buffer.alloc(64));
+  fs.rmSync(path.join(root, SESSION, 'audio.pcm'));
+  fs.symlinkSync(outside, path.join(root, SESSION, 'audio.pcm'));
+  await assert.rejects(catalog.audioPath(root, SESSION), (error) => error.code === 'invalid-path');
+  await assert.rejects(catalog.sessionDir(root, '../etc'), /sessionId is invalid/);
 });
 
-test('playback and export reject a segment changed after manifest publication', (context) => {
-  const data = fixture();
-  const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-export-'));
-  context.after(() => {
-    fs.rmSync(data.root, { recursive: true, force: true });
-    fs.rmSync(destination, { recursive: true, force: true });
-  });
-  fs.appendFileSync(data.segmentPath, 'tampered');
-
-  const payload = {
-    sessionId: data.sessionId,
-    trackId: 'microphone-abc',
-    segmentId: 'segment',
-  };
-  assert.throws(() => resolveSegment(data.root, payload), /byte length/);
-  assert.throws(() => exportSession(data.root, data.sessionId, destination), /byte length/);
-});
-
-test('linked segment files cannot escape the recording directory', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
-  const target = path.join(data.root, 'outside.wav');
-  fs.copyFileSync(data.segmentPath, target);
-  fs.unlinkSync(data.segmentPath);
-  try { fs.symlinkSync(target, data.segmentPath); }
-  catch (error) { if (error.code === 'EPERM') return context.skip('Symlink privilege unavailable'); throw error; }
-  assert.throws(() => resolveSegment(data.root, {
-    sessionId: data.sessionId, trackId: 'microphone-abc', segmentId: 'segment',
-  }), /symlink/);
-});
-
-test('manifest path traversal is rejected even if manifest is tampered', (context) => {
-  const data = fixture();
-  context.after(() => fs.rmSync(data.root, { recursive: true, force: true }));
-  data.manifest.segments[0].relativePath = '../../outside.wav';
-  fs.writeFileSync(path.join(data.root, data.sessionId, 'manifest.json'), JSON.stringify(data.manifest));
-
-  assert.throws(() => resolveSegment(data.root, {
-    sessionId: data.sessionId,
-    trackId: 'microphone-abc',
-    segmentId: 'segment',
-  }), /escapes/);
+test('diagnostics carry session.json and call.json but never transcript text', async (t) => {
+  const root = tempRoot(t);
+  writeSession(root, { frames: 16000 });
+  fs.writeFileSync(path.join(root, SESSION, 'call.json'), JSON.stringify({ ...fresh(SESSION, { transcribe: true }), stage: 'complete',
+    transcript: { windows: [{ index: 0, text: 'secret words', utterances: null }] } }));
+  const report = JSON.parse(await service(root).diagnostics(SESSION));
+  assert.equal(report.session.format, 'kern-call-audio/1');
+  assert.deepEqual(report.call.transcript, { windows: 1 });
+  assert.equal(report.audioFrames, 16000);
+  assert.doesNotMatch(JSON.stringify(report), /secret words/);
 });

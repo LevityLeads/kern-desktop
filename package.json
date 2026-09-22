@@ -11,7 +11,7 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
     "test:node": "node --test test/*.test.js",
     "test:dotnet": "dotnet test native/Kern.Recorder.sln --configuration Release --no-restore",
     "restore:dotnet": "dotnet restore native/Kern.Recorder.sln --locked-mode",
