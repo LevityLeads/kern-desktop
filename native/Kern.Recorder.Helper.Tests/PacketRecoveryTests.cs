@@ -155,11 +155,17 @@ public sealed class PacketRecoveryTests : IDisposable
         }
         Assert.Empty(failures);
         fixture.Render();
-        // Both before the interruption, microphone alone inside it, incoming alone after it.
-        Assert.InRange(fixture.Sample(80), 8900, 9100);
-        Assert.InRange(fixture.Sample(240), 2900, 3100);
-        Assert.InRange(fixture.Sample(400), 2900, 3100);
-        Assert.InRange(fixture.Sample(1700), 5900, 6100);
+        // Both before the interruption, microphone alone inside it, incoming alone after it. Each side sits on
+        // its own output channel, so the split is visible per channel rather than as a summed level.
+        const int mic = RenderConstants.MicrophoneLane, playback = RenderConstants.PlaybackLane;
+        Assert.InRange(fixture.Sample(80, mic), 2900, 3100);
+        Assert.InRange(fixture.Sample(80, playback), 5900, 6100);
+        Assert.InRange(fixture.Sample(240, mic), 2900, 3100);
+        Assert.Equal(0, fixture.Sample(240, playback));
+        Assert.InRange(fixture.Sample(400, mic), 2900, 3100);
+        Assert.Equal(0, fixture.Sample(400, playback));
+        Assert.Equal(0, fixture.Sample(1700, mic));
+        Assert.InRange(fixture.Sample(1700, playback), 5900, 6100);
         Assert.Equal(1440, fixture.Session.Segments.Where(s => s.TrackId == "render").Sum(s => s.SampleCount));
     }
 

@@ -30,7 +30,7 @@ internal static partial class CallRenderer
             var windows = RenderArtifacts.Windows(paths, audio, plan.SampleCount, complete: false,
                 temporaryFiles.Add, previousWindows);
             var manifest = new RenderLiveManifest(1, RenderConstants.Version, plan.Session.SessionId, plan.Fingerprint,
-                plan.SampleCount, RenderConstants.Rate, 1, 16, RenderPolicy.Name(peakPolicy), windows, false);
+                plan.SampleCount, RenderConstants.Rate, RenderConstants.Channels, 16, RenderConstants.ChannelRoles, RenderPolicy.Name(peakPolicy), windows, false);
             WriteJson(paths, temporaryManifest, manifest);
             paths.Publish(temporaryManifest, "derived/live-manifest.json");
             return manifest;

@@ -60,7 +60,7 @@ internal static class RenderValidation
             var reportedFrames = Scale(segment.TimelineEndTicks - segment.TimelineStartTicks,
                 RenderConstants.Rate, session.TimelineFrequency);
             if (Math.Abs(reportedFrames - frames) > RenderConstants.Rate / 50) timingMismatches++;
-            inputs.Add(new RenderInput(segment, format, start, frames));
+            inputs.Add(new RenderInput(segment, format, RenderConstants.LaneFor(track.Kind), start, frames));
             sampleCount = Math.Max(sampleCount, checked(start + frames));
         }
         foreach (var group in inputs.GroupBy(input => input.Segment.TrackId))
@@ -76,7 +76,7 @@ internal static class RenderValidation
             sampleCount = Math.Max(sampleCount, checked(run.StartSample + run.SampleCount));
         // Cloud window coordinates use integer milliseconds; pad by less than 1 ms.
         sampleCount = checked((sampleCount + 15) / 16 * 16);
-        if (sampleCount <= 0 || sampleCount > RenderConstants.MaxSamples || checked(sampleCount * 2 + 44) > uint.MaxValue)
+        if (sampleCount <= 0 || sampleCount > RenderConstants.MaxSamples || checked(sampleCount * RenderConstants.FrameBytes + 44) > uint.MaxValue)
             throw new InvalidDataException("Unsupported call duration: canonical RIFF rendering is limited to 12 hours.");
         if (timingMismatches > 0) warnings.Add($"segment-timing-mismatch: {timingMismatches} segments; sample duration preserved, unknown internal gaps not invented.");
         if (overlappingRuns > 0) warnings.Add($"overlapping-source-runs: {overlappingRuns} overlaps; samples retained and mixed.");

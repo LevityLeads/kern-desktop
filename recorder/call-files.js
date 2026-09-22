@@ -8,10 +8,10 @@ const { assertSessionId } = require('./protocol');
 const MAX_MANIFEST = 32 * 1024 * 1024;
 const MAX_JSON = 4 * 1024 * 1024;
 const MAX_UPLOAD = 20 * 1024 * 1024;
-// The rendered playback file stays local and grows with call length (16 kHz mono
-// 16-bit = 32 KB/s). It must never be measured against the per-object cloud cap:
-// 20 MB is only 10.9 minutes. The renderer's own ceiling is 12 hours.
-const MAX_PLAYBACK = 44 + 12 * 3600 * 16000 * 2;
+// The rendered call file stays local and grows with call length (16 kHz stereo
+// 16-bit = 64 KB/s). It must never be measured against the per-object cloud cap:
+// 20 MB is only 5.5 minutes. The renderer's own ceiling is 12 hours.
+const MAX_PLAYBACK = 44 + 12 * 3600 * 16000 * 4;
 const HASH = /^[0-9a-f]{64}$/i;
 
 // `reason` is a short machine token naming the exact check that failed. It reaches the UI

@@ -5,6 +5,7 @@ const { CallError, boundedFile, sourceManifest, fail } = require('./call-files')
 const { validateDerived, uploadInventory } = require('./call-derived');
 const { renderCall } = require('./call-render');
 const { downloadTranscript } = require('./call-transcript');
+const { pruneAudio } = require('./call-prune');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function bind(processor, state) {
@@ -27,6 +28,14 @@ async function processCall(processor, state) {
   const signal = processor.abort.signal;
   state.processingStage = 'locate-recording';
   const id = state.sessionId, dir = await store.directory(id);
+  // Audio discarded after transcription: there is nothing left to render, upload or play.
+  if (state.audioPruned) {
+    if (!state.transcript) throw new CallError('audio-pruned', 'The audio for this call was discarded after transcription.');
+    state.state = 'complete'; state.progress = 1; state.error = null; state.errorCode = null;
+    state.processingStage = 'complete'; state.preparePending = false; state.requested = false;
+    await processor.save(state);
+    return;
+  }
   if (state.cloudHold && !state.preparePending) return;
   if (state.remoteId && state.uploadFinalized && !state.preparePending && !state.explicitRetry) {
     if (state.origin !== http.origin()) throw new CallError('origin-changed', 'Kern connection changed. Cloud synchronization is paused.');
@@ -117,6 +126,13 @@ async function pollCall(processor, state, api, prefix, status = null) {
     state.state = 'complete'; state.progress = 1; state.error = null; state.errorCode = null;
     state.processingStage = 'complete';
     state.requested = false; state.retryCount = 0; state.nextAttemptAt = 0;
+    // The transcript is durable before a single byte of audio is removed.
+    await processor.save(state);
+    state.processingStage = 'prune-audio';
+    const dir = await processor.store.directory(state.sessionId);
+    await pruneAudio(dir);
+    state.audioPruned = true; state.playbackReady = false; state.playbackUrl = null;
+    state.processingStage = 'complete';
     await processor.save(state); return;
   }
   if (['deleting', 'deleted'].includes(status.state)) throw new CallError('deleted', 'This cloud call was deleted. Local audio is still available.');

@@ -10,11 +10,12 @@ const { MAX_UPLOAD } = require('../recorder/call-files');
 
 const SESSION = '3d6f0f5a-1b6b-4c1e-9a6e-2f8d6c1e0b11';
 const RATE = 16000, CORE = 60 * RATE, OVERLAP = RATE;
+const FRAME = 4; // 16-bit stereo: microphone left, playback right
 
 function sha(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function wav(samples) {
   // Header bytes are not validated here; only byte length and hash are.
-  return Buffer.alloc(44 + samples * 2);
+  return Buffer.alloc(44 + samples * FRAME);
 }
 // Lays out a complete derived set exactly as the native renderer publishes it.
 function renderedSession(root, sampleCount) {
@@ -35,8 +36,8 @@ function renderedSession(root, sampleCount) {
       coreStartSample: coreStart, coreEndSample: coreEnd, byteLength: bytes.length, sha256: sha(bytes) });
   }
   fs.writeFileSync(path.join(dir, 'derived', 'manifest.json'), JSON.stringify({
-    version: 1, rendererVersion: 'kern-call-render-1', complete: true, sessionId: SESSION,
-    sourceFingerprint: sha(manifest), sampleRate: RATE, channels: 1, bitsPerSample: 16, sampleCount,
+    version: 1, rendererVersion: 'kern-call-render-2', complete: true, sessionId: SESSION,
+    sourceFingerprint: sha(manifest), sampleRate: RATE, channels: 2, bitsPerSample: 16, channelRoles: ['microphone', 'playback'], sampleCount,
     durationSeconds: sampleCount / RATE, sourceIntegrity: 'verified',
     audio: { relativePath: 'derived/call.wav', byteLength: audio.length, sha256: sha(audio) }, windows, warnings: [],
   }));
@@ -46,14 +47,14 @@ function renderedSession(root, sampleCount) {
 test('a rendered call longer than the per-object cloud cap still validates for playback', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kern-derived-'));
   try {
-    // 21 MiB of playback audio: ~11.5 minutes, past the 20 MiB per-object upload cap.
-    const sampleCount = (21 * 1024 * 1024) / 2;
+    // 21 MiB of rendered audio: ~5.7 minutes of stereo, past the 20 MiB per-object upload cap.
+    const sampleCount = (21 * 1024 * 1024) / FRAME;
     assert.equal(sampleCount % 16, 0);
     const dir = renderedSession(root, sampleCount);
     assert.ok(fs.statSync(path.join(dir, 'derived', 'call.wav')).size > MAX_UPLOAD);
     const validated = await validateDerived(dir, SESSION, {});
     assert.equal(validated.derived.sampleCount, sampleCount);
-    assert.equal(validated.derived.windows.length, 12);
+    assert.equal(validated.derived.windows.length, 6);
     assert.ok(validated.playbackFile.endsWith('call.wav'));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -66,7 +67,7 @@ test('a rendered call past the renderer ceiling is still rejected', async () => 
     const derived = JSON.parse(fs.readFileSync(derivedPath, 'utf8'));
     derived.sampleCount = 12 * 3600 * RATE + 16;
     derived.durationSeconds = derived.sampleCount / RATE;
-    derived.audio.byteLength = 44 + derived.sampleCount * 2;
+    derived.audio.byteLength = 44 + derived.sampleCount * FRAME;
     fs.writeFileSync(derivedPath, JSON.stringify(derived));
     await assert.rejects(validateDerived(dir, SESSION, {}), e => e.code === 'invalid-recording' && e.reason === 'derived-over-ceiling');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -90,6 +91,9 @@ test('every validation failure names the exact check that failed', async () => {
     assert.equal(await reasonFor(d => { d.sourceFingerprint = 'f'.repeat(64); }), 'derived-source-fingerprint');
     assert.equal(await reasonFor(d => { d.durationSeconds += 1; }), 'derived-duration');
     assert.equal(await reasonFor(d => { d.audio.byteLength += 2; }), 'derived-audio-shape');
+    assert.equal(await reasonFor(d => { d.channels = 1; }), 'derived-format');
+    assert.equal(await reasonFor(d => { d.channelRoles = ['playback', 'microphone']; }), 'derived-format');
+    assert.equal(await reasonFor(d => { d.rendererVersion = 'kern-call-render-1'; }), 'derived-renderer-version');
     assert.equal(await reasonFor(d => { d.windows = []; }), 'derived-window-count');
     assert.equal(await reasonFor(d => { d.windows[0].sha256 = 'a'.repeat(64); }), 'file-hash-mismatch');
     // Playback file truncated on disk: the cached manifest still matches itself, the bytes do not.

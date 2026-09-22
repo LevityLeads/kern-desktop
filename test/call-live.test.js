@@ -29,7 +29,7 @@ function json(body, status = 200) {
 function windowFile(k, sampleCount = Infinity) {
   const coreStart = k * CORE, coreEnd = Math.min(sampleCount, coreStart + CORE);
   const start = Math.max(0, coreStart - OVERLAP), end = Math.min(sampleCount, coreEnd + OVERLAP);
-  const bytes = Buffer.alloc(44 + (end - start) * 2, k + 1);
+  const bytes = Buffer.alloc(44 + (end - start) * 4, k + 1);
   const name = `window-${String(k).padStart(6, '0')}`;
   return { bytes, meta: { windowId: name, relativePath: `derived/${name}.wav`, byteLength: bytes.length, sha256: sha(bytes),
     startSample: start, endSample: end, coreStartSample: coreStart, coreEndSample: coreEnd,
@@ -70,8 +70,8 @@ function liveRenderer(dir, { calls = [], onSpawn = null, deferKill = false } = {
       fs.writeFileSync(path.join(dir, meta.relativePath), bytes);
       windows.push(meta);
     }
-    fs.writeFileSync(path.join(dir, 'derived', 'live-manifest.json'), JSON.stringify({ version: 1, rendererVersion: 'kern-call-render-1',
-      sessionId: SESSION, sourceFingerprint: 'f'.repeat(64), throughSamples: through * 16, sampleRate: RATE, channels: 1, bitsPerSample: 16,
+    fs.writeFileSync(path.join(dir, 'derived', 'live-manifest.json'), JSON.stringify({ version: 1, rendererVersion: 'kern-call-render-2',
+      sessionId: SESSION, sourceFingerprint: 'f'.repeat(64), throughSamples: through * 16, sampleRate: RATE, channels: 2, bitsPerSample: 16, channelRoles: ['microphone', 'playback'],
       peakPolicy: 'none', complete: false, windows }));
     if (deferKill) child.kill = () => { onSpawn?.('kill'); setImmediate(() => { onSpawn?.('close'); child.emit('close', null); }); return true; };
     else { child.kill = () => true; setImmediate(() => child.emit('close', 0)); }
@@ -164,7 +164,7 @@ test('live publisher opens once, registers and uploads complete windows in order
   assert.deepEqual([first.windowIndex, first.startMs, first.endMs, first.coreStartMs, first.coreEndMs], [0, 0, 61000, 0, 60000]);
   assert.deepEqual([second.windowIndex, second.startMs, second.endMs, second.coreStartMs, second.coreEndMs], [1, 59000, 121000, 60000, 120000]);
   assert.equal(first.kind, 'window');
-  assert.deepEqual(first.wav, { sampleRate: 16000, channels: 1, bitsPerSample: 16, format: 'pcm', frames: 61000 * 16 });
+  assert.deepEqual(first.wav, { sampleRate: 16000, channels: 2, bitsPerSample: 16, format: 'pcm', frames: 61000 * 16 });
   assert.equal(first.sha256, windowFile(0).meta.sha256);
   assert.deepEqual(cloud.puts, [windowId(0), windowId(1)]);
   assert.ok(validateLiveManifest(dir, SESSION));
@@ -259,7 +259,7 @@ test('processCall after a live call uploads only new objects and seals through l
   captureManifest(dir, { mic: 135000, sys: 135000 }, 'stopped', true);
   const fingerprint = sha(fs.readFileSync(path.join(dir, 'manifest.json')));
   const sampleCount = 135 * RATE;
-  const audio = Buffer.alloc(44 + sampleCount * 2);
+  const audio = Buffer.alloc(44 + sampleCount * 4);
   fs.writeFileSync(path.join(dir, 'derived', 'call.wav'), audio);
   const windows = [];
   for (let k = 0; k < 3; k += 1) {
@@ -267,8 +267,8 @@ test('processCall after a live call uploads only new objects and seals through l
     fs.writeFileSync(path.join(dir, meta.relativePath), bytes);
     windows.push(meta);
   }
-  fs.writeFileSync(path.join(dir, 'derived', 'manifest.json'), JSON.stringify({ version: 1, rendererVersion: 'kern-call-render-1', complete: true,
-    sessionId: SESSION, sourceFingerprint: fingerprint, sampleRate: RATE, channels: 1, bitsPerSample: 16, sampleCount,
+  fs.writeFileSync(path.join(dir, 'derived', 'manifest.json'), JSON.stringify({ version: 1, rendererVersion: 'kern-call-render-2', complete: true,
+    sessionId: SESSION, sourceFingerprint: fingerprint, sampleRate: RATE, channels: 2, bitsPerSample: 16, channelRoles: ['microphone', 'playback'], sampleCount,
     durationSeconds: sampleCount / RATE, sourceIntegrity: 'verified',
     audio: { relativePath: 'derived/call.wav', byteLength: audio.length, sha256: sha(audio) }, windows, warnings: [] }));
   const cloud = fakeCloud(t, { callState: 'live' });
@@ -283,9 +283,8 @@ test('processCall after a live call uploads only new objects and seals through l
   assert.equal(state.uploadFinalized, true);
   assert.equal(state.fingerprint, fingerprint);
   assert.equal(state.durationMs, 135000);
-  const originals = [];
-  for (const track of ['mic', 'sys']) for (let s = 0; s < 27; s += 1) originals.push(stableId(SESSION, fingerprint, `segments/${track}/${String(s).padStart(4, '0')}.wav`));
-  assert.deepEqual(cloud.puts, [...originals, windowId(2, sampleCount)]);
+  // Capture checkpoints stay local: only the one window not yet published live goes up.
+  assert.deepEqual(cloud.puts, [windowId(2, sampleCount)]);
   assert.ok(!cloud.puts.includes(windowId(0)) && !cloud.puts.includes(windowId(1)));
   assert.equal(cloud.requests.filter(r => r.route === `/api/calls/${REMOTE}/finalize`).length, 0);
   assert.equal(cloud.requests.filter(r => r.route === '/api/calls' && r.method === 'POST').length, 0);
@@ -293,8 +292,9 @@ test('processCall after a live call uploads only new objects and seals through l
   assert.equal(sealed.length, 1);
   assert.equal(sealed[0].body.sessionId, SESSION);
   assert.equal(sealed[0].body.durationMs, 135000);
-  assert.deepEqual(sealed[0].body.objects.map(o => o.id), [...originals, windowId(0), windowId(1), windowId(2, sampleCount)]);
-  assert.deepEqual(state.uploaded, [windowId(0), windowId(1), ...originals, windowId(2, sampleCount)]);
+  assert.deepEqual(sealed[0].body.objects.map(o => o.id), [windowId(0), windowId(1), windowId(2, sampleCount)]);
+  assert.deepEqual(sealed[0].body.objects.map(o => o.wav.channels), [2, 2, 2]);
+  assert.deepEqual(state.uploaded, [windowId(0), windowId(1), windowId(2, sampleCount)]);
 });
 
 test('polling a transcribing call surfaces the worker error, attempt count and window progress instead of a silent wait', async t => {

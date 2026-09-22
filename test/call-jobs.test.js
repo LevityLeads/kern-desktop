@@ -69,23 +69,23 @@ test('uploadInventory rejects calls longer than two hours', async () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('upload inventory accepts capture and legacy encoding casing without accepting aliases', async () => {
+test('upload inventory carries only stereo windows; capture checkpoints are never uploaded', async () => {
   const dir = tmp();
   try {
     fs.mkdirSync(path.join(dir, 'segments'));
-    const body = Buffer.alloc(100);
-    fs.writeFileSync(path.join(dir, 'segments', 'test.wav'), body);
-    const segment = {status:'finalised', relativePath:'segments/test.wav', trackId:'track',
-      sampleCount:7, byteLength:100, sha256:crypto.createHash('sha256').update(body).digest('hex')};
-    for (const encoding of ['pcm','Pcm','ieeefloat','IeeeFloat','extensible','Extensible']) {
-      const track = {trackId:'track',format:{encoding,sampleRate:48000,channels:2,bitsPerSample:32,
-        subFormat:'00000003-0000-0010-8000-00aa00389b71'}};
-      const validated = {manifest:{segments:[segment],tracks:[track]},fingerprint:'f'.repeat(64),derived:{sampleCount:16000,windows:[]}};
-      const inventory = await uploadInventory(dir, SESSION, validated);
-      assert.equal(inventory.files[0].object.wav.format, encoding.toLowerCase()==='pcm'?'pcm':'float');
-      track.format.encoding='float';
-      await assert.rejects(uploadInventory(dir, SESSION, validated));
-    }
+    fs.writeFileSync(path.join(dir, 'segments', 'test.wav'), Buffer.alloc(100));
+    const segment = {status:'finalised', relativePath:'segments/test.wav', trackId:'track', sampleCount:7, byteLength:100, sha256:'a'.repeat(64)};
+    const track = {trackId:'track',format:{encoding:'pcm',sampleRate:48000,channels:2,bitsPerSample:16}};
+    const frames = 61000 * 16;
+    const window = { windowId: 'window-000000', relativePath: 'derived/window-000000.wav', byteLength: 44 + frames * 4, sha256: 'b'.repeat(64),
+      startSample: 0, endSample: frames, coreStartSample: 0, coreEndSample: 60000 * 16 };
+    const validated = {manifest:{segments:[segment],tracks:[track]},fingerprint:'f'.repeat(64),derived:{sampleCount:70000 * 16,windows:[window]}};
+    const inventory = await uploadInventory(dir, SESSION, validated);
+    assert.equal(inventory.files.length, 1);
+    assert.equal(inventory.files[0].relativePath, 'derived/window-000000.wav');
+    assert.deepEqual(inventory.sealed.objects.map(o => o.kind), ['window']);
+    assert.deepEqual(inventory.sealed.objects[0].wav, { sampleRate: 16000, channels: 2, bitsPerSample: 16, format: 'pcm', frames });
+    assert.equal(inventory.sealed.durationMs, 70000);
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });
 

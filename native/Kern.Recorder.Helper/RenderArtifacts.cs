@@ -5,7 +5,7 @@ namespace Kern.Recorder.Helper;
 
 internal static class RenderArtifacts
 {
-    // Slices callFile ([0, samples) of 16k mono PCM) into published derived/window-NNNNNN.wav files.
+    // Slices callFile ([0, samples) of canonical 16k stereo PCM frames) into published derived/window-NNNNNN.wav files.
     // complete: the audio is the whole call, so the trailing partial window is emitted too. Otherwise
     // only windows with a full second of audio beyond their end are cut, keeping any resampler tail at
     // the truncation point away from a published file. An identical existing file is left untouched.
@@ -27,8 +27,8 @@ internal static class RenderArtifacts
             trackTemporary?.Invoke(temporary);
             using (var writer = new CanonicalWaveWriter(paths.Resolve(temporary), end - start))
             {
-                call.Position = 44 + start * 2;
-                var remaining = (end - start) * 2;
+                call.Position = 44 + start * RenderConstants.FrameBytes;
+                var remaining = (end - start) * RenderConstants.FrameBytes;
                 while (remaining > 0)
                 {
                     var count = (int)Math.Min(buffer.Length, remaining);
@@ -89,7 +89,8 @@ internal static class RenderArtifacts
                 manifest.RendererVersion != RenderConstants.Version || manifest.SourceFingerprint != plan.Fingerprint ||
                 manifest.SessionId != plan.Session.SessionId || manifest.SampleCount != plan.SampleCount ||
                 manifest.PeakPolicy != RenderPolicy.Describe(peakPolicy) ||
-                manifest.SampleRate != RenderConstants.Rate || manifest.Channels != 1 || manifest.BitsPerSample != 16 ||
+                manifest.SampleRate != RenderConstants.Rate || manifest.Channels != RenderConstants.Channels || manifest.BitsPerSample != 16 ||
+                manifest.ChannelRoles is null || !manifest.ChannelRoles.SequenceEqual(RenderConstants.ChannelRoles) ||
                 manifest.DurationSeconds != Seconds(plan.SampleCount) || manifest.SourceIntegrity != "verified" ||
                 manifest.Audio.RelativePath != "derived/call.wav" || manifest.Sources.Count != plan.Inputs.Count ||
                 !manifest.Warnings.SequenceEqual(plan.Warnings) || !double.IsFinite(manifest.SourcePeak) ||
@@ -130,12 +131,12 @@ internal static class RenderArtifacts
     private static bool Matches(RenderPaths paths, RenderArtifact artifact, long samples)
     {
         using var stream = paths.OpenRead(artifact.RelativePath);
-        if (artifact.ByteLength != samples * 2 + 44 || stream.Length != artifact.ByteLength ||
+        if (artifact.ByteLength != samples * RenderConstants.FrameBytes + 44 || stream.Length != artifact.ByteLength ||
             RenderValidation.Hash(stream) != artifact.Sha256) return false;
         stream.Position = 0;
         using var reader = new WaveFileReader(stream);
-        return reader.Length == samples * 2 && reader.WaveFormat.Encoding == WaveFormatEncoding.Pcm &&
-            reader.WaveFormat.SampleRate == RenderConstants.Rate && reader.WaveFormat.Channels == 1 && reader.WaveFormat.BitsPerSample == 16;
+        return reader.Length == samples * RenderConstants.FrameBytes && reader.WaveFormat.Encoding == WaveFormatEncoding.Pcm &&
+            reader.WaveFormat.SampleRate == RenderConstants.Rate && reader.WaveFormat.Channels == RenderConstants.Channels && reader.WaveFormat.BitsPerSample == 16;
     }
     private static double Seconds(long sample) => (double)sample / RenderConstants.Rate;
 }

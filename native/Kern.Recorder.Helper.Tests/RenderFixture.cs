@@ -21,8 +21,9 @@ internal sealed class RenderFixture : IDisposable
     }
     // tone: write a sine whose frequency and phase are seeded by the segment index (and offset per channel)
     // instead of a constant, so resampling and the downmix carry real filter state across segments.
+    // kind: "render" (a playback endpoint, output channel 1) or "microphone" (output channel 0).
     public SegmentManifest Add(float amplitude, long startMs = 0, int durationMs = 1000, int rate = 16000,
-        int channels = 1, bool floating = false, string? trackId = null, bool tone = false)
+        int channels = 1, bool floating = false, string? trackId = null, bool tone = false, string kind = "render")
     {
         var id = Guid.NewGuid().ToString("N");
         trackId ??= Guid.NewGuid().ToString("N");
@@ -32,7 +33,7 @@ internal sealed class RenderFixture : IDisposable
             wave.AverageBytesPerSecond, wave.Encoding.ToString(), null, null, null);
         if (Session.Tracks.All(track => track.TrackId != trackId))
             Session.Tracks.Add(new TrackManifest { TrackId = trackId, EndpointId = trackId, Name = trackId,
-                Kind = "render", DefaultRoles = [], Format = format, Generation = 1 });
+                Kind = kind, DefaultRoles = [], Format = format, Generation = 1 });
         var relative = $"segments/{id}.wav";
         Directory.CreateDirectory(Path.Combine(Root, "segments"));
         var path = Path.Combine(Root, relative);
@@ -79,10 +80,13 @@ internal sealed class RenderFixture : IDisposable
         using var stream = File.OpenRead(Path.Combine(Root, relative));
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
-    public short Sample(long index)
+    // One 16-bit sample of the rendered call at a frame index. Defaults to the playback channel,
+    // which is where every "render" track (the fixture default) lands.
+    public short Sample(long frame, int channel = RenderConstants.PlaybackLane) => Sample("derived/call.wav", frame, channel);
+    public short Sample(string relative, long frame, int channel)
     {
-        using var stream = File.OpenRead(Path.Combine(Root, "derived", "call.wav"));
-        stream.Position = 44 + index * 2;
+        using var stream = File.OpenRead(Path.Combine(Root, relative));
+        stream.Position = 44 + frame * RenderConstants.FrameBytes + channel * RenderConstants.BytesPerSample;
         using var reader = new BinaryReader(stream);
         return reader.ReadInt16();
     }

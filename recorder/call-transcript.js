@@ -2,6 +2,10 @@
 
 const { fail } = require('./call-files');
 
+// Speaker labels come from the audio source, not a diarisation guess: 'me' is the microphone
+// channel, 'them' is the playback channel. Older (mono) transcripts carry no label at all.
+const SPEAKERS = new Set(['me', 'them']);
+
 async function downloadTranscript(api, prefix, durationMs) {
   const segments = [], texts = [];
   let after = -1, totalBytes = 0;
@@ -18,10 +22,13 @@ async function downloadTranscript(api, prefix, durationMs) {
       texts.push(item.text);
       for (const s of item.segments) {
         if (!Number.isFinite(s.startMs) || !Number.isFinite(s.endMs) || s.startMs < 0 ||
-            s.endMs < s.startMs || s.endMs > durationMs + 1000 || typeof s.text !== 'string') fail();
+            s.endMs < s.startMs || s.endMs > durationMs + 1000 || typeof s.text !== 'string' ||
+            (s.speaker !== undefined && !SPEAKERS.has(s.speaker))) fail();
         totalBytes += Buffer.byteLength(s.text);
         if (totalBytes > 1024 * 1024 || segments.length >= 100000) fail('size', 'Transcript exceeds the local display limit.');
-        segments.push({ startMs: s.startMs, endMs: s.endMs, text: s.text });
+        const segment = { startMs: s.startMs, endMs: s.endMs, text: s.text };
+        if (s.speaker !== undefined) segment.speaker = s.speaker;
+        segments.push(segment);
       }
       after = window.window_index;
       if (after >= maxWindows) fail();

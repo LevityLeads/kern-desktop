@@ -18,7 +18,37 @@ public sealed class CallRendererTests
         Assert.Equal(0, fixture.Sample(1000));
         Assert.InRange(fixture.Sample(16000), 16370, 16390);
         Assert.Equal(0, fixture.Sample(31000));
-        Assert.Equal(64044, rendered.Audio.ByteLength);
+        Assert.Equal(32000 * RenderConstants.FrameBytes + 44, rendered.Audio.ByteLength);
+        Assert.Equal(2, rendered.Channels);
+        Assert.Equal(["microphone", "playback"], rendered.ChannelRoles);
+    }
+
+    [Fact]
+    public void MicrophoneAndPlaybackLandOnSeparateChannelsInCallAndWindows()
+    {
+        using var fixture = new RenderFixture(2000);
+        fixture.Add(0.3f, durationMs: 2000, trackId: "mic", kind: "microphone");
+        fixture.Add(0.2f, durationMs: 2000, rate: 48000, channels: 2, floating: true, trackId: "headset", kind: "render");
+        fixture.Add(0.1f, durationMs: 2000, trackId: "speakers", kind: "render");
+        var rendered = fixture.Render();
+        Assert.Equal(1, rendered.Gain);
+        // Channel 0 carries only the microphone; channel 1 sums every playback endpoint.
+        Assert.InRange(fixture.Sample(16000, RenderConstants.MicrophoneLane), 9800, 9900);
+        Assert.InRange(fixture.Sample(16000, RenderConstants.PlaybackLane), 9800, 9900);
+        Assert.InRange(fixture.Sample(1000, RenderConstants.MicrophoneLane), 9800, 9900);
+        var window = rendered.Windows[0];
+        Assert.Equal(44 + (window.EndSample - window.StartSample) * RenderConstants.FrameBytes, window.ByteLength);
+        Assert.InRange(fixture.Sample(window.RelativePath, 16000, RenderConstants.MicrophoneLane), 9800, 9900);
+        Assert.InRange(fixture.Sample(window.RelativePath, 16000, RenderConstants.PlaybackLane), 9800, 9900);
+    }
+
+    [Fact]
+    public void UnknownTrackKindIsRejectedBeforeRendering()
+    {
+        using var fixture = new RenderFixture();
+        fixture.Add(0.1f, kind: "loopback"); fixture.Save();
+        Assert.Throws<InvalidDataException>(() => CallRenderer.Render(fixture.Root));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "derived")));
     }
 
     [Fact]

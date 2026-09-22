@@ -43,7 +43,7 @@ internal static partial class CallRenderer
             if (verified.Fingerprint != plan.Fingerprint)
                 throw new InvalidDataException("Source manifest changed during render.");
             var manifest = new RenderManifest(1, RenderConstants.Version, plan.Session.SessionId, plan.Fingerprint,
-                RenderConstants.Rate, 1, 16, plan.SampleCount, (double)plan.SampleCount / RenderConstants.Rate,
+                RenderConstants.Rate, RenderConstants.Channels, 16, RenderConstants.ChannelRoles, plan.SampleCount, (double)plan.SampleCount / RenderConstants.Rate,
                 "verified", plan.Warnings, plan.Inputs.Select(input => new RenderSource(input.Segment.SegmentId,
                     input.Segment.RelativePath, input.Segment.ByteLength, input.Segment.Sha256)).ToArray(),
                 RenderPolicy.Describe(peakPolicy), peak, gain, RenderArtifacts.Describe(paths, "derived/call.wav"), windows, true);
@@ -63,7 +63,8 @@ internal static partial class CallRenderer
     private static void EnsureFreeSpace(RenderPaths paths, RenderPlan plan)
     {
         var driveRoot = Path.GetPathRoot(paths.Root) ?? throw new IOException("Render volume is unavailable.");
-        var requiredBytes = checked(plan.SampleCount * 9 + 64L * 1024 * 1024);
+        // Float accumulator (8 B/frame) + call file (4 B/frame) + windows (~4 B/frame) + slack.
+        var requiredBytes = checked(plan.SampleCount * 17 + 64L * 1024 * 1024);
         if (new DriveInfo(driveRoot).AvailableFreeSpace < requiredBytes)
             throw new IOException("Insufficient free space for bounded offline rendering.");
     }

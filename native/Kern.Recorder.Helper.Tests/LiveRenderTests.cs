@@ -13,7 +13,7 @@ public sealed class LiveRenderTests
         for (var start = fromMs; start < toMs; start += 5000)
         {
             fixture.Add(amplitude, startMs: start, durationMs: 5000, rate: 48000, channels: 2, floating: true, trackId: "system", tone: true);
-            fixture.Add(amplitude, startMs: start, durationMs: 5000, trackId: "mic", tone: true);
+            fixture.Add(amplitude, startMs: start, durationMs: 5000, trackId: "mic", tone: true, kind: "microphone");
         }
     }
 
@@ -64,9 +64,18 @@ public sealed class LiveRenderTests
         var published = File.ReadAllBytes(fixture.Derived("window-000001.wav"));
         var distinct = Enumerable.Range(0, 400).Select(i => BitConverter.ToInt16(published, 44 + i * 2)).Distinct().Count();
         Assert.True(distinct > 50, $"window 1 carries only {distinct} distinct sample values");
+        Assert.Equal(2, live.Channels);
+        Assert.Equal(["microphone", "playback"], live.ChannelRoles);
+        // Each side of the call sits on its own channel of the published window.
+        var mic = Enumerable.Range(0, 400).Select(i => fixture.Sample("derived/window-000001.wav", i, RenderConstants.MicrophoneLane)).Count(v => v != 0);
+        var playback = Enumerable.Range(0, 400).Select(i => fixture.Sample("derived/window-000001.wav", i, RenderConstants.PlaybackLane)).Count(v => v != 0);
+        Assert.True(mic > 300 && playback > 300, $"mic {mic}, playback {playback} non-zero of 400");
 
-        // The call gets loud after the live point. A global peak gain would rescale everything before it.
+        // The call gets loud after the live point: two playback endpoints at 0.9 sum past full scale on the
+        // playback channel. A global peak gain would rescale everything before it.
         AddCall(fixture, 200_000, 230_000, 0.9f);
+        for (var start = 200_000; start < 230_000; start += 5000)
+            fixture.Add(0.9f, startMs: start, durationMs: 5000, trackId: "speakers", tone: true);
         fixture.Session.DurationMs = 230_000;
         fixture.Session.State = "stopped";
         fixture.Session.EndedAtUtc = DateTimeOffset.UtcNow.ToString("O");
