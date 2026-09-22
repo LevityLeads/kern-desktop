@@ -47,7 +47,7 @@ internal static partial class WindowsNative
 
     // Windows Search opens freshly written files to index them, which races the
     // recorder's own atomic replaces. NTFS propagates the attribute to new children.
-    internal static void ExcludeFromContentIndexing(string directory)
+    private static void ExcludeFromContentIndexing(string directory)
     {
         if (!OperatingSystem.IsWindows()) return;
         try

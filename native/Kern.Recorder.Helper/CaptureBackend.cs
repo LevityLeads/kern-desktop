@@ -1,61 +1,44 @@
-using NAudio.CoreAudioApi;
-
 namespace Kern.Recorder.Helper;
 
-internal interface ICaptureTrack : IDisposable
-{
-    string TrackId { get; }
-    string EndpointId { get; }
-    string Kind { get; }
-    long Generation { get; }
-    bool IsRetired { get; }
-    bool IsCapturing { get; }
-    bool HasWriterFailure { get; }
-    TrackManifest ToManifest();
-    TrackStatus Status(long nowTicks);
-    void Start();
-    void Stop(long cutoffTicks);
-    void PauseAtFence(long cutoffTicks);
-    void ResumeAtFence(long cutoffTicks);
-    void ApplyMicrophoneFence(bool enabled, long cutoffTicks, string reason);
-    void UpdateDefaultRoles(IReadOnlyList<string> roles);
-    void RetireEndpoint(long cutoffTicks, string reason);
-}
-
+// The engine's only view of Windows audio, so its state machine runs under test with fakes.
 internal interface ICaptureBackend
 {
-    event EventHandler? Changed;
-    DeviceList List();
-    /// <summary>Every playback endpoint the session should capture: all active render endpoints.</summary>
-    HashSet<string> RenderIds();
-    HashSet<string> ActiveCaptureIds();
-    string ResolveMicrophoneId(MicrophoneSelection selection);
-    IReadOnlyList<string> DefaultRoles(string id, string kind);
-    ICaptureTrack CreateTrack(string endpointId, string kind, string sessionPath, TimelineClock clock,
-        int segmentDurationMs, CaptureFence fence, Action<SegmentManifest> onSegment,
-        Action<ICaptureTrack, Exception> onFailure);
+    event EventHandler? DevicesChanged;
+    DeviceList ListDevices();
+    ICaptureSource OpenMicrophone(MicrophoneSelection selection);
+    ICaptureSource OpenProcessLoopback(int excludedProcessId);
+    // Active render endpoints, id to friendly name.
+    IReadOnlyDictionary<string, string> ActiveRenderEndpoints();
+    ICaptureSource OpenEndpointLoopback(string endpointId);
 }
 
 internal sealed class WasapiCaptureBackend(AudioDevices devices) : ICaptureBackend
 {
-    public event EventHandler? Changed { add => devices.Changed += value; remove => devices.Changed -= value; }
-    public DeviceList List() => devices.List();
-    public HashSet<string> RenderIds() => devices.ActiveRenderIds();
-    public HashSet<string> ActiveCaptureIds() => devices.ActiveCaptureIds();
-    public string ResolveMicrophoneId(MicrophoneSelection selection)
+    // Activation normally completes in milliseconds. A wedged audio service must not hold the
+    // start command hostage; endpoint loopback is the fallback either way.
+    private static readonly TimeSpan ProcessLoopbackTimeout = TimeSpan.FromSeconds(5);
+
+    public event EventHandler? DevicesChanged { add => devices.Changed += value; remove => devices.Changed -= value; }
+
+    public DeviceList ListDevices() => devices.List();
+
+    public ICaptureSource OpenMicrophone(MicrophoneSelection selection) =>
+        WasapiCaptureSource.Open(devices.ResolveMicrophone(selection), loopback: false);
+
+    public ICaptureSource OpenProcessLoopback(int excludedProcessId)
     {
-        using var device = devices.ResolveMicrophone(selection);
-        return device.ID;
+        var activation = WasapiCaptureSource.OpenProcessLoopbackAsync(excludedProcessId);
+        try { return activation.WaitAsync(ProcessLoopbackTimeout).GetAwaiter().GetResult(); }
+        catch (TimeoutException)
+        {
+            _ = activation.ContinueWith(late => late.Result.Dispose(), CancellationToken.None,
+                TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+            throw;
+        }
     }
-    public IReadOnlyList<string> DefaultRoles(string id, string kind) =>
-        devices.DefaultRoles(id, kind == "render" ? DataFlow.Render : DataFlow.Capture);
-    public ICaptureTrack CreateTrack(string endpointId, string kind, string sessionPath, TimelineClock clock,
-        int segmentDurationMs, CaptureFence fence, Action<SegmentManifest> onSegment,
-        Action<ICaptureTrack, Exception> onFailure)
-    {
-        var device = devices.OpenDevice(endpointId);
-        try { return new CaptureTrack(device, kind, sessionPath, clock, segmentDurationMs,
-            fence, DefaultRoles(endpointId, kind), onSegment, onFailure); }
-        catch { device.Dispose(); throw; }
-    }
+
+    public IReadOnlyDictionary<string, string> ActiveRenderEndpoints() => devices.ActiveRenderEndpoints();
+
+    public ICaptureSource OpenEndpointLoopback(string endpointId) =>
+        WasapiCaptureSource.Open(devices.OpenActiveRenderDevice(endpointId), loopback: true);
 }

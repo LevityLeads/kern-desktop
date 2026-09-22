@@ -30,25 +30,7 @@ internal static class AtomicFile
         FlushDirectoryBestEffort(directory);
     }
 
-    public static void AppendJournal(string path, object value)
-    {
-        var json = JsonSerializer.Serialize(value, Protocol.JsonOptions);
-        using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
-        using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false), 4096, leaveOpen: true);
-        writer.WriteLine(json);
-        writer.Flush();
-        stream.Flush(flushToDisk: true);
-    }
-
-    public static void Publish(string temporaryPath, string finalPath)
-    {
-        using (var stream = new FileStream(temporaryPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.WriteThrough))
-            stream.Flush(flushToDisk: true);
-        Retry(() => File.Move(temporaryPath, finalPath), ReplaceBudget);
-        FlushDirectoryBestEffort(Path.GetDirectoryName(finalPath)!);
-    }
-
-    public static void DeleteBestEffort(string path)
+    private static void DeleteBestEffort(string path)
     {
         try
         {

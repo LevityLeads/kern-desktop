@@ -33,10 +33,11 @@ public sealed class ProtocolTests
     [Fact]
     public void TypedPayloadsRejectUnknownProperties()
     {
-        const string json = "{\"sessionId\":\"f0b03de7-d139-4c32-b92f-7c5bdd57a9f5\",\"sessionPath\":\"C:\\\\recording\",\"extra\":true}";
+        const string json = "{\"sessionId\":\"f0b03de7-d139-4c32-b92f-7c5bdd57a9f5\",\"sessionPath\":\"C:\\\\recording\",\"microphone\":{\"mode\":\"default\"},\"segmentDurationMs\":5000}";
         using var document = JsonDocument.Parse(json);
 
-        Assert.Throws<JsonException>(() => document.RootElement.Deserialize<RecoverRequest>(Protocol.JsonOptions));
+        // segmentDurationMs was protocol 1; a desktop still sending it must be refused loudly.
+        Assert.Throws<JsonException>(() => document.RootElement.Deserialize<StartRequest>(Protocol.JsonOptions));
     }
 
     [Fact]
@@ -50,7 +51,7 @@ public sealed class ProtocolTests
     [Fact]
     public void ParsesStrictHelperArguments()
     {
-        var options = HelperOptions.Parse(["--pipe", "kern-recorder-abc", "--parent-pid", "42", "--protocol", "1"]);
+        var options = HelperOptions.Parse(["--pipe", "kern-recorder-abc", "--parent-pid", "42", "--protocol", "2"]);
 
         Assert.Equal("kern-recorder-abc", options.PipeName);
         Assert.Equal(42, options.ParentProcessId);
@@ -62,7 +63,7 @@ public sealed class ProtocolTests
     [Fact]
     public void ParsesAndValidatesAppBuildLabel()
     {
-        string[] baseline = ["--pipe", "kern-recorder-abc", "--parent-pid", "42", "--protocol", "1"];
+        string[] baseline = ["--pipe", "kern-recorder-abc", "--parent-pid", "42", "--protocol", "2"];
         var options = HelperOptions.Parse([.. baseline, "--app-build", "1.1.0-capture.20+1e09e1e"]);
         Assert.Equal("1.1.0-capture.20+1e09e1e", options.AppBuild);
         Assert.Throws<ArgumentException>(() => HelperOptions.Parse([.. baseline, "--app-build", ""]));
@@ -71,42 +72,75 @@ public sealed class ProtocolTests
     }
 
     [Fact]
-    public void ManifestProducerDevicesAndCountersRoundTripUnderStrictJson()
+    public void StartRequestParsesWithoutOptionalDeviceId()
     {
-        var manifest = new SessionManifest
-        {
-            SessionId = "f0b03de7-d139-4c32-b92f-7c5bdd57a9f5",
-            State = "stopped",
-            StartedAtUtc = "2026-09-22T09:00:00.0000000+00:00",
-            TimelineFrequency = TimelineClock.Frequency,
-            TimelineOriginTicks = 0,
-            ManifestVersion = 2,
-            Producer = new ProducerInfo("1.1.0-capture.20+1e09e1e", "1.0.0.0", Protocol.Version),
-            DevicesAtStart = new DeviceList(
-                [new EndpointInfo("{render}", "Headphones (AirPods Pro)", "render", "active", true, ["communications", "multimedia"])],
-                [new EndpointInfo("{capture}", "Microphone (FIFINE K670)", "capture", "active", true, [])]),
-        };
-        manifest.Tracks.Add(new TrackManifest
-        {
-            TrackId = "render-x", EndpointId = "{render}", Name = "Headphones (AirPods Pro)", Kind = "render",
-            DefaultRoles = ["multimedia"], Format = new TrackFormat(48000, 2, 32, 8, 384000, "extensible", 32, 3, "00000003-0000-0010-8000-00aa00389b71"),
-            Counters = new TrackCounters(1000, 480000, 240000, 200000, 900, 3, 0, 0, 1),
-        });
+        using var document = JsonDocument.Parse(
+            "{\"sessionId\":\"f0b03de7-d139-4c32-b92f-7c5bdd57a9f5\",\"sessionPath\":\"C:\\\\r\",\"microphone\":{\"mode\":\"default\"}}");
 
-        var json = JsonSerializer.SerializeToUtf8Bytes(manifest, Protocol.JsonOptions);
-        var parsed = JsonSerializer.Deserialize<SessionManifest>(json, Protocol.JsonOptions);
+        var request = document.RootElement.Deserialize<StartRequest>(Protocol.JsonOptions);
 
-        Assert.NotNull(parsed);
-        Assert.Equal(manifest.Producer, parsed.Producer);
-        Assert.Equal("Headphones (AirPods Pro)", parsed.DevicesAtStart!.RenderEndpoints[0].Name);
-        Assert.Equal(["communications", "multimedia"], parsed.DevicesAtStart.RenderEndpoints[0].DefaultRoles);
-        Assert.Equal(manifest.Tracks[0].Counters, parsed.Tracks[0].Counters);
-        // Older manifests without these fields still load.
-        var legacy = JsonSerializer.Deserialize<SessionManifest>(
-            "{\"protocolVersion\":1,\"manifestVersion\":2,\"sessionId\":\"f0b03de7-d139-4c32-b92f-7c5bdd57a9f5\",\"state\":\"stopped\",\"startedAtUtc\":\"x\",\"timelineFrequency\":10000000,\"timelineOriginTicks\":0,\"durationMs\":0,\"sizeBytes\":0,\"captureGeneration\":1,\"micMuted\":false,\"tracks\":[],\"segments\":[],\"gaps\":[]}",
-            Protocol.JsonOptions);
-        Assert.NotNull(legacy);
-        Assert.Null(legacy.Producer);
-        Assert.Null(legacy.DevicesAtStart);
+        Assert.NotNull(request);
+        Assert.Equal(new MicrophoneSelection("default", null), request.Microphone);
+    }
+
+    [Fact]
+    public void HelperReportsVersionTwo() => Assert.Equal("2.0.0.0", RecorderEngine.HelperVersion);
+
+    [Fact]
+    public void RejectsProtocolOneHelperArguments()
+    {
+        Assert.Throws<ArgumentException>(() => HelperOptions.Parse(["--pipe", "kern-recorder-abc", "--parent-pid", "42", "--protocol", "1"]));
+    }
+
+    [Fact]
+    public void StatusSerialisesToTheProtocolTwoShapeWithExplicitNulls()
+    {
+        var status = new RecorderStatus("recording", "f0b03de7-d139-4c32-b92f-7c5bdd57a9f5", "2026-09-22T09:00:00.0000000+00:00",
+            1500, 800, false, "all-apps",
+            [new SourceStatus("microphone", "me", "Microphone (FIFINE K670)", "microphone", "active", 0.42, null,
+                new SourceStats(150, 72_000, 24_000, 0, 0, 0, 0, 0))],
+            null, null);
+
+        using var json = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(status, Protocol.JsonOptions));
+        var root = json.RootElement;
+
+        Assert.Equal(
+            ["state", "sessionId", "startedAtUtc", "elapsedMs", "committedFrames", "micMuted", "playbackMode", "sources", "failure", "warning"],
+            root.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("failure").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("warning").ValueKind);
+        var source = root.GetProperty("sources")[0];
+        Assert.Equal(["id", "lane", "name", "mode", "state", "level", "message", "stats"], source.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(JsonValueKind.Null, source.GetProperty("message").ValueKind);
+        Assert.Equal(
+            ["packets", "inputFrames", "outputFrames", "gaps", "gapFrames", "lateFrames", "resyncs", "droppedFrames"],
+            source.GetProperty("stats").EnumerateObject().Select(property => property.Name));
+    }
+
+    [Fact]
+    public void SessionDocumentSerialisesToTheSpecShape()
+    {
+        var document = new SessionDocument(SessionDocument.FormatName, "f0b03de7-d139-4c32-b92f-7c5bdd57a9f5", "recording",
+            "2026-09-22T09:00:00.0000000+00:00", null, CallAudio.SampleRate, CallAudio.Channels, CallAudio.LaneNames, 0,
+            new ProducerInfo("1.1.0-capture.30+abc1234", "2.0.0.0", Protocol.Version), "devices",
+            [new SessionSource("playback-0123456789ab", "them", "Headphones (AirPods Pro)", "endpoint-loopback", "idle", null,
+                new SourceStats(0, 0, 0, 0, 0, 0, 0, 0))],
+            [new PauseSpan(16_000, null, "user")], null);
+
+        using var json = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(document, Protocol.JsonOptions));
+        var root = json.RootElement;
+
+        Assert.Equal(
+            ["format", "sessionId", "state", "startedAtUtc", "endedAtUtc", "sampleRate", "channels", "lanes", "committedFrames",
+                "producer", "playbackMode", "sources", "pauses", "failure"],
+            root.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("kern-call-audio/1", root.GetProperty("format").GetString());
+        Assert.Equal(["me", "them"], root.GetProperty("lanes").EnumerateArray().Select(lane => lane.GetString()));
+        Assert.Equal(2, root.GetProperty("producer").GetProperty("protocol").GetInt32());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("endedAtUtc").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("pauses")[0].GetProperty("endFrame").ValueKind);
+        Assert.False(root.GetProperty("sources")[0].TryGetProperty("level", out _));
+        var parsed = JsonSerializer.Deserialize<SessionDocument>(json.RootElement.GetRawText(), Protocol.JsonOptions);
+        Assert.Equal(document.Producer, parsed!.Producer);
     }
 }

@@ -51,28 +51,27 @@ internal sealed class AudioDevices : IDisposable
             Enumerate(DataFlow.Capture, defaults));
     }
 
-    public MMDevice OpenDevice(string endpointId) => enumerator.GetDevice(endpointId);
-
-    // Every active playback endpoint is captured, not just the multimedia default. A call app
-    // renders wherever it likes: Teams and Zoom use the communications default, Chrome the
-    // multimedia default, and all of them let the user pick a device in-app. Capturing only
-    // one default lost the far side of a call whenever those disagreed. An idle endpoint
-    // emits no loopback packets in event mode and sustained silence is never written, so the
-    // extra tracks cost nothing on disk.
-    public HashSet<string> ActiveRenderIds() => ActiveEndpointIds(DataFlow.Render);
-
-    public HashSet<string> ActiveCaptureIds() => ActiveEndpointIds(DataFlow.Capture);
-
-    private HashSet<string> ActiveEndpointIds(DataFlow flow)
+    public MMDevice OpenActiveRenderDevice(string endpointId)
     {
-        using var collection = enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active);
-        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var device = enumerator.GetDevice(endpointId);
+        if (device.DataFlow == DataFlow.Render && device.State == DeviceState.Active) return device;
+        device.Dispose();
+        throw new InvalidOperationException("Playback device is not active.");
+    }
+
+    // In endpoint-loopback mode every active playback endpoint is captured, not just the
+    // multimedia default: Teams and Zoom use the communications default, browsers the
+    // multimedia default, and all of them let the user pick a device in-app.
+    public Dictionary<string, string> ActiveRenderEndpoints()
+    {
+        using var collection = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+        var endpoints = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var i = 0; i < collection.Count; i++)
         {
-            using var snapshot = collection[i];
-            ids.Add(snapshot.ID);
+            using var device = collection[i];
+            endpoints[device.ID] = device.FriendlyName;
         }
-        return ids;
+        return endpoints;
     }
 
     public MMDevice ResolveMicrophone(MicrophoneSelection selection)
@@ -96,16 +95,6 @@ internal sealed class AudioDevices : IDisposable
         {
             throw new ProtocolException("microphone-unavailable", "Chosen microphone is unavailable.");
         }
-    }
-
-    public IReadOnlyList<string> DefaultRoles(string endpointId, DataFlow flow)
-    {
-        var defaults = GetDefaults();
-        return defaults
-            .Where(item => item.Flow == flow && string.Equals(item.DeviceId, endpointId, StringComparison.Ordinal))
-            .Select(item => item.Role.ToString().ToLowerInvariant())
-            .OrderBy(role => role, StringComparer.Ordinal)
-            .ToList();
     }
 
     private List<(DataFlow Flow, Role Role, string DeviceId)> GetDefaults()

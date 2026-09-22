@@ -17,7 +17,7 @@ internal sealed class HelperServer : IDisposable
     {
         this.options = options;
         devices = new AudioDevices();
-        engine = new RecorderEngine(devices, new TimelineClock()) { AppBuild = options.AppBuild };
+        engine = new RecorderEngine(new WasapiCaptureBackend(devices), new TimelineClock(), options.ParentProcessId) { AppBuild = options.AppBuild };
         engine.StatusChanged += OnStatusChanged;
         devices.StartNotifications(shutdown.Token);
     }
@@ -37,13 +37,42 @@ internal sealed class HelperServer : IDisposable
         if (!WindowsNative.IsNamedPipeClientProcess(pipe, options.ParentProcessId))
             throw new UnauthorizedAccessException("Capture helper rejected a non-parent pipe client.");
 
-        while (!shutdown.IsCancellationRequested && pipe.IsConnected)
+        // Commands run in arrival order on one worker; pings are answered straight from the read
+        // loop. Opening process loopback can take seconds, and the desktop treats a ping that
+        // waits behind it as a hung helper and kills it mid-call.
+        var commands = System.Threading.Channels.Channel.CreateUnbounded<JsonElement>(
+            new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        var worker = Task.Run(async () =>
         {
-            using var message = await Protocol.ReadAsync(pipe, shutdown.Token).ConfigureAwait(false);
-            if (message is null) break;
-            await HandleAsync(message.RootElement, shutdown.Token).ConfigureAwait(false);
+            await foreach (var command in commands.Reader.ReadAllAsync(shutdown.Token).ConfigureAwait(false))
+            {
+                // A reply that cannot be written means the pipe is gone; the read loop ends too.
+                try { await HandleAsync(command, shutdown.Token).ConfigureAwait(false); }
+                catch (Exception error) when (error is IOException or ObjectDisposedException) { shutdown.Cancel(); }
+            }
+        });
+        try
+        {
+            while (!shutdown.IsCancellationRequested && pipe.IsConnected)
+            {
+                using var message = await Protocol.ReadAsync(pipe, shutdown.Token).ConfigureAwait(false);
+                if (message is null) break;
+                var root = message.RootElement.Clone();
+                if (IsPing(root)) await HandleAsync(root, shutdown.Token).ConfigureAwait(false);
+                else commands.Writer.TryWrite(root);
+            }
+        }
+        finally
+        {
+            commands.Writer.TryComplete();
+            try { await worker.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
         }
     }
+
+    private static bool IsPing(JsonElement root) =>
+        root.ValueKind == JsonValueKind.Object && root.TryGetProperty("command", out var command) &&
+        command.ValueKind == JsonValueKind.String && command.GetString() == "ping";
 
     private async Task HandleAsync(JsonElement root, CancellationToken cancellationToken)
     {
@@ -61,7 +90,9 @@ internal sealed class HelperServer : IDisposable
             await WriteAsync(new { type = "response", protocolVersion = Protocol.Version, requestId, ok = true, result }, cancellationToken).ConfigureAwait(false);
             if (command == "shutdown") shutdown.Cancel();
         }
-        catch (Exception error) when (error is ProtocolException or JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        // Every failure becomes an error reply. A WASAPI COMException or a NAudio argument check
+        // used to escape this filter and kill the helper, which the desktop saw as a crash.
+        catch (Exception error) when (error is not OperationCanceledException and not OutOfMemoryException)
         {
             var code = error is ProtocolException protocolError ? protocolError.Code : "helper-error";
             await WriteAsync(new
@@ -87,7 +118,6 @@ internal sealed class HelperServer : IDisposable
         "unmute-mic" => engine.SetMicMuted(false, DeserializeControl(payload)),
         "stop" => engine.Stop(DeserializeControl(payload)),
         "suspend" => engine.Suspend(DeserializeControl(payload)),
-        "recover" => engine.Recover(Deserialize<RecoverRequest>(payload)),
         "shutdown" => EmptyPayload(payload, new { state = "shutdown" }),
         _ => throw new ProtocolException("unknown-command", "Unknown capture helper command."),
     };

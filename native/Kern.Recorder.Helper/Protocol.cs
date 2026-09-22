@@ -6,7 +6,7 @@ namespace Kern.Recorder.Helper;
 
 internal static class Protocol
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const int MaximumMessageBytes = 256 * 1024;
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
