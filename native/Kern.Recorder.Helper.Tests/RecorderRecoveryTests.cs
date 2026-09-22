@@ -164,8 +164,8 @@ public sealed class RecorderRecoveryTests : IDisposable
     {
         var backend = new FakeBackend();
         using var engine = Start(backend);
-        backend.Created[0].Fail();
         backend.RejectOpen = true;
+        backend.Created[0].Fail();
         engine.CheckRecovery();
         var attempts = backend.OpenAttempts;
         for (var i = 0; i < 10; i++) engine.CheckRecovery();
@@ -181,8 +181,10 @@ public sealed class RecorderRecoveryTests : IDisposable
         var backend = new FakeBackend();
         using var engine = Start(backend, new TimelineClock(() => ticks));
         engine.CheckRecovery();
-        backend.Created[0].Fail();
+        // Arm the rejection before the failure: the health loop runs CheckRecovery every
+        // 250 ms on its own thread and would otherwise reopen the device in between.
         backend.RejectOpen = true;
+        backend.Created[0].Fail();
         for (var index = 0; index < 20; index++)
         {
             ticks += 30 * TimelineClock.Frequency;
