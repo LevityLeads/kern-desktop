@@ -32,7 +32,16 @@ internal sealed class SessionClock(TimelineClock clock, long originTicks)
     public long? FrameAtQpc(long qpc100Nanoseconds)
     {
         if (qpc100Nanoseconds <= 0) return null;
-        try { return FrameAt(clock.FromQpc100Nanoseconds(qpc100Nanoseconds)); }
+        try
+        {
+            var frame = FrameAt(clock.FromQpc100Nanoseconds(qpc100Nanoseconds));
+            // A real WASAPI stamp is for a sample already captured, so it never lies in the
+            // future. Anything past now (with a second of slack for clock skew) cannot be on
+            // this machine's QPC timeline; reject it rather than trust a garbage stamp that
+            // happened to convert without overflowing.
+            if (frame > NowFrame + CallAudio.SampleRate) return null;
+            return frame;
+        }
         catch (Exception error) when (error is OverflowException or ArgumentOutOfRangeException) { return null; }
     }
 
