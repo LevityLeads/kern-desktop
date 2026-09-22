@@ -36,6 +36,7 @@ internal sealed class CaptureTrack : ICaptureTrack
     private long discontinuities;
     private long segmentsPublished;
     private long lastHeartbeatTicks;
+    private long lastCallbackTicks;
     private long? expectedDevicePosition;
     private long consecutiveSilentFrames;
     private long continuityId;
@@ -120,6 +121,7 @@ internal sealed class CaptureTrack : ICaptureTrack
             ThrowIfDisposed();
             health = "healthy-idle";
             lastHeartbeatTicks = clock.NowTicks;
+            lastCallbackTicks = lastHeartbeatTicks;
             minimumPersistenceTicks = lastHeartbeatTicks;
             persist = fence.PersistAll && (Kind != "microphone" || fence.PersistMicrophone);
         }
@@ -303,11 +305,17 @@ internal sealed class CaptureTrack : ICaptureTrack
                 if (!positionTrusted || discontinuity) continuityId++;
                 if (discontinuity)
                 {
-                    // WASAPI flags stream transitions as well as glitches. Count only
-                    // a measured forward gap; do not claim every flag lost samples.
-                    if (positionTrusted && expectedDevicePosition is long expected && devicePosition > expected)
+                    // WASAPI flags stream transitions as well as glitches, and the device frame
+                    // counter alone cannot prove loss: a USB microphone's position jumped 185 s
+                    // forward mid-call while its callbacks never paused and every frame was kept
+                    // (measured 2026-09-22). Loss is claimed only for the part of a forward jump
+                    // that the wall clock also failed to deliver.
+                    var lost = positionTrusted && expectedDevicePosition is long expected && devicePosition > expected
+                        ? CorroboratedLoss(devicePosition - expected, callbackTicks - lastCallbackTicks, frames, Format.SampleRate)
+                        : 0;
+                    if (lost > 0)
                     {
-                        droppedFrames += devicePosition - expected;
+                        droppedFrames += lost;
                         historicalLoss = "Some audio is missing: endpoint skipped audio frames.";
                         message = historicalLoss;
                     }
@@ -316,6 +324,7 @@ internal sealed class CaptureTrack : ICaptureTrack
                         message = "Capture endpoint reported a timing discontinuity; a new audio run was started.";
                     }
                 }
+                lastCallbackTicks = callbackTicks;
                 expectedDevicePosition = positionTrusted ? devicePosition + frames : null;
                 sampleCount += frames;
 
@@ -402,6 +411,16 @@ internal sealed class CaptureTrack : ICaptureTrack
                 }
             }
         }
+    }
+
+    // Frames genuinely lost across a forward device-position jump: the smaller of the jump and
+    // what the wall clock says was not delivered between the two callbacks (elapsed time minus
+    // the packet that did arrive). A counter reset with continuous callbacks scores zero.
+    internal static long CorroboratedLoss(long positionGap, long elapsedTicks, int packetFrames, int sampleRate)
+    {
+        if (positionGap <= 0 || elapsedTicks <= 0) return 0;
+        var undelivered = TimelineClock.FramesForDuration(elapsedTicks, sampleRate) - packetFrames;
+        return Math.Clamp(undelivered, 0, positionGap);
     }
 
     internal static int FramesStrictlyBefore(

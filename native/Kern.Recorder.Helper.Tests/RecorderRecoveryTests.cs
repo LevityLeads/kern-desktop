@@ -57,13 +57,62 @@ public sealed class RecorderRecoveryTests : IDisposable
         var backend = new FakeBackend();
         using var engine = Start(backend);
         var old = backend.Created[0];
-        backend.RenderIds = ["speakers"];
+        backend.RenderIdSet = ["speakers"];
         backend.Notify();
         engine.CheckRecovery();
         Assert.True(old.IsRetired);
         Assert.Equal("speakers", backend.Created[^1].EndpointId);
         Assert.Single(backend.Created, t => t.Kind == "render" && t.IsCapturing);
         engine.Stop(Control());
+    }
+
+    [Fact]
+    public void EveryActivePlaybackEndpointIsCapturedAndOneRefusingToOpenIsSkippedNotFatal()
+    {
+        // Rees's PC (2026-09-22): nine active playback endpoints, the call app free to use any
+        // of them. Capturing only the multimedia default lost the far side whenever they differed.
+        var backend = new FakeBackend { RenderIdSet = ["airpods-output", "cable-in", "speakers"] };
+        backend.RejectEndpoints.Add("cable-in");
+        using var engine = Start(backend);
+        Assert.Equal(["airpods-output", "speakers"], backend.Created.Where(t => t.Kind == "render").Select(t => t.EndpointId).Order());
+        Assert.Equal("recording", engine.Snapshot().State);
+        // The skipped endpoint is never retried and never degrades the session.
+        for (var i = 0; i < 5; i++) { backend.Notify(); engine.CheckRecovery(); }
+        Assert.Equal("recording", engine.Snapshot().State);
+        Assert.Null(engine.Snapshot().Message);
+        Assert.DoesNotContain(backend.Created, t => t.EndpointId == "cable-in");
+        engine.Stop(Control());
+        var manifest = SessionStore.Open(root, backend.SessionId!).Manifest;
+        var skipped = Assert.Single(manifest.SkippedEndpoints);
+        Assert.Equal("cable-in", skipped.EndpointId);
+        Assert.Equal("Endpoint unavailable", skipped.Reason);
+        Assert.Empty(manifest.Gaps);
+    }
+
+    [Fact]
+    public async Task SecondaryPlaybackEndpointFailureIsRecoveredOnItsOwnWhileOthersKeepCapturing()
+    {
+        var backend = new FakeBackend { RenderIdSet = ["airpods-output", "speakers"] };
+        using var engine = Start(backend);
+        var speakers = backend.Created.Single(t => t.EndpointId == "speakers");
+        speakers.Fail();
+        Assert.Equal("degraded", engine.Snapshot().State);
+        Assert.True(backend.Created.Single(t => t.EndpointId == "airpods-output").IsCapturing);
+        engine.CheckRecovery();
+        var replacement = backend.Created.Last(t => t.EndpointId == "speakers");
+        Assert.NotSame(speakers, replacement);
+        Assert.Equal(2, backend.Created.Count(t => t.Kind == "render" && t.IsCapturing));
+        // Unplugging it instead of it coming back closes the gap and clears the degraded state.
+        backend.RenderIdSet = ["airpods-output"];
+        backend.Notify();
+        engine.CheckRecovery();
+        Assert.True(replacement.IsRetired);
+        // The health loop, not CheckRecovery, lifts the degraded state once nothing is recovering.
+        await WaitUntil(() => engine.Snapshot().State == "recording");
+        engine.Stop(Control());
+        var manifest = SessionStore.Open(root, backend.SessionId!).Manifest;
+        Assert.All(manifest.Gaps, gap => Assert.NotNull(gap.EndTicks));
+        Assert.Single(backend.Created, t => t.EndpointId == "airpods-output");
     }
 
     [Fact]
@@ -189,13 +238,15 @@ public sealed class RecorderRecoveryTests : IDisposable
         public event EventHandler? Changed;
         public List<FakeTrack> Created { get; } = [];
         public HashSet<string> CaptureIds { get; set; } = ["fifine", "airpods-mic"];
-        public HashSet<string> RenderIds { get; set; } = ["airpods-output"];
+        public HashSet<string> RenderIdSet { get; set; } = ["airpods-output"];
+        public HashSet<string> RejectEndpoints { get; } = [];
         public string? SessionId;
         public bool RejectOpen;
         public int OpenAttempts;
         public void Notify() => Changed?.Invoke(this, EventArgs.Empty);
         public DeviceList List() => new([], []);
-        public HashSet<string> DefaultRenderIds() => RenderIds;
+        // The engine must treat this as a snapshot; mutating it would corrupt the test's own set.
+        public HashSet<string> RenderIds() => RenderIdSet;
         public HashSet<string> ActiveCaptureIds() => CaptureIds;
         public string ResolveMicrophoneId(MicrophoneSelection selection) => selection.DeviceId ?? "fifine";
         public IReadOnlyList<string> DefaultRoles(string id, string kind) => ["multimedia"];
@@ -203,7 +254,7 @@ public sealed class RecorderRecoveryTests : IDisposable
             int segmentDurationMs, CaptureFence fence, Action<SegmentManifest> onSegment, Action<ICaptureTrack, Exception> onFailure)
         {
             OpenAttempts++;
-            if (RejectOpen) throw new IOException("Endpoint unavailable");
+            if (RejectOpen || RejectEndpoints.Contains(endpointId)) throw new IOException("Endpoint unavailable");
             var track = new FakeTrack(endpointId, kind, fence, clock, onFailure);
             Created.Add(track);
             return track;

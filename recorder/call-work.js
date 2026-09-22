@@ -109,18 +109,33 @@ async function uploadFiles(processor, state, api, prefix, dir, inventory, signal
     await processor.save(state);
   }
 }
+const CLOUD_CODE = /^[a-z][a-z0-9_-]{0,63}$/i;
 async function pollCall(processor, state, api, prefix, status = null) {
   status ||= await api(prefix);
   if (status.state === 'complete') {
     state.transcript = await downloadTranscript(api, prefix, state.durationMs);
-    state.state = 'complete'; state.progress = 1;
+    state.state = 'complete'; state.progress = 1; state.error = null; state.errorCode = null;
+    state.processingStage = 'complete';
     state.requested = false; state.retryCount = 0; state.nextAttemptAt = 0;
     await processor.save(state); return;
   }
   if (['deleting', 'deleted'].includes(status.state)) throw new CallError('deleted', 'This cloud call was deleted. Local audio is still available.');
   if (status.state === 'failed') throw new CallError('cloud-failed', 'Cloud transcription failed. Retry explicitly. Local audio is safe.');
   if (!['live', 'validating', 'queued', 'transcribing'].includes(status.state)) fail('protocol', 'Kern returned an invalid call state.');
-  state.state = 'transcribing'; state.progress = 0;
+  state.state = 'transcribing';
+  state.processingStage = status.state === 'validating' ? 'cloud-validating' : 'cloud-transcribing';
+  // The worker retries a failing window up to 8 times over ~40 minutes before the call fails.
+  // That is not "stuck": the status carries the job's error and attempt count, so show them.
+  const job = status.job && typeof status.job === 'object' ? status.job : {};
+  const code = [job.errorCode, status.errorCode].find(value => typeof value === 'string' && CLOUD_CODE.test(value)) || null;
+  const attempts = Number.isSafeInteger(job.attempts) && job.attempts >= 0 ? job.attempts : null;
+  const cursor = Number.isSafeInteger(job.cursor) && job.cursor >= 0 ? job.cursor : null;
+  const windows = Number.isSafeInteger(status.windowCount) && status.windowCount > 0 ? status.windowCount : null;
+  state.progress = job.stage === 'transcribe' && cursor !== null && windows ? Math.min(1, cursor / windows) : 0;
+  state.errorCode = code;
+  state.error = code
+    ? `Kern's transcription worker hit ${code}${attempts !== null ? ` (attempt ${attempts} of 8` : ''}${cursor !== null && attempts !== null ? `, window ${cursor + 1}${windows ? ` of ${windows}` : ''}` : ''}${attempts !== null ? ')' : ''} and is retrying.`
+    : null;
   state.retryCount = 0; state.nextAttemptAt = Date.now() + 5000;
   await processor.save(state);
   processor.schedule(state.sessionId, 5000);

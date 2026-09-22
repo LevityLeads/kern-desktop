@@ -58,6 +58,17 @@ internal sealed class SessionStore
         }
     }
 
+    public void AddSkippedEndpoint(SkippedEndpoint endpoint)
+    {
+        lock (gate)
+        {
+            if (Manifest.SkippedEndpoints.Any(existing => existing.EndpointId == endpoint.EndpointId)) return;
+            Manifest.SkippedEndpoints.Add(endpoint);
+            Append("endpoint-skipped", endpoint);
+            PersistManifest();
+        }
+    }
+
     public void AddSegment(SegmentManifest segment)
     {
         lock (gate)

@@ -6,8 +6,13 @@ internal sealed partial class RecorderEngine
 {
     private string? pinnedMicrophoneId;
     private bool devicesChanged;
+    // Recovery is tracked per endpoint for playback (several are captured at once) and
+    // once for the pinned microphone. Keys: "microphone" or "render:<endpointId>".
     private readonly Dictionary<string, RecoveryAttempt> recovery = [];
     private readonly HashSet<string> permanentlyFailed = [];
+    // Playback endpoints that refused to open when the session started. They are not
+    // desired for the rest of the session, so they never enter recovery or degrade it.
+    private readonly HashSet<string> skippedRenderEndpoints = new(StringComparer.Ordinal);
     private sealed class RecoveryAttempt
     {
         public int Attempts;
@@ -15,6 +20,9 @@ internal sealed partial class RecorderEngine
         public string? GapId;
         public long AcquireDeadline;
     }
+
+    private static string RecoveryKey(string kind, string endpointId) =>
+        kind == "microphone" ? "microphone" : $"render:{endpointId}";
 
     private void OnDevicesChanged(object? sender, EventArgs eventArgs)
     {
@@ -53,8 +61,9 @@ internal sealed partial class RecorderEngine
             failure = new { code = "track-storage-failed", trackId = track.TrackId, message = error.Message };
         }
         finally { track.Dispose(); }
-        if (!recovery.TryGetValue(track.Kind, out var attempt))
-            recovery[track.Kind] = attempt = new RecoveryAttempt();
+        var key = RecoveryKey(track.Kind, track.EndpointId);
+        if (!recovery.TryGetValue(key, out var attempt))
+            recovery[key] = attempt = new RecoveryAttempt();
         attempt.GapId ??= store!.OpenGap(track.Kind, "endpoint-unavailable", cutoff, fence.Generation).GapId;
     }
 
@@ -84,7 +93,8 @@ internal sealed partial class RecorderEngine
             foreach (var attempt in recovery.Values) { attempt.Attempts = 0; attempt.NextTicks = 0; }
             devicesChanged = false;
         }
-        var renderIds = devices.DefaultRenderIds();
+        var renderIds = new HashSet<string>(devices.RenderIds(), StringComparer.Ordinal);
+        renderIds.ExceptWith(skippedRenderEndpoints);
         var captureIds = devices.ActiveCaptureIds();
         foreach (var track in tracks.Where(t => !t.IsRetired).ToArray())
         {
@@ -93,17 +103,27 @@ internal sealed partial class RecorderEngine
                 RetireTrack(track, now, "Recording endpoint is unavailable; some audio may be missing.");
             else track.UpdateDefaultRoles(devices.DefaultRoles(track.EndpointId, track.Kind));
         }
-        EnsureTrack("render", renderIds.FirstOrDefault(), now);
+        // A playback endpoint that is gone (unplugged, disabled) is not recovered: there is no
+        // audio to get back from a device that no longer exists. Its gap closes where it left.
+        foreach (var key in recovery.Keys.Where(k => k.StartsWith("render:", StringComparison.Ordinal) && !renderIds.Contains(k["render:".Length..])).ToArray())
+        {
+            if (recovery[key].GapId is string gapId) store!.CloseGap(gapId, now);
+            recovery.Remove(key);
+        }
+        foreach (var endpointId in renderIds.OrderBy(id => id, StringComparer.Ordinal))
+            EnsureTrack("render", endpointId, now);
         EnsureTrack("microphone", pinnedMicrophoneId is not null && captureIds.Contains(pinnedMicrophoneId) ? pinnedMicrophoneId : null, now);
         PersistState();
     }
 
     private void EnsureTrack(string kind, string? endpointId, long now)
     {
-        var active = tracks.FirstOrDefault(t => !t.IsRetired && t.Kind == kind && t.IsCapturing);
+        var key = RecoveryKey(kind, endpointId ?? string.Empty);
+        var active = tracks.FirstOrDefault(t => !t.IsRetired && t.Kind == kind && t.IsCapturing &&
+            (kind != "render" || t.EndpointId == endpointId));
         if (active is not null)
         {
-            if (recovery.TryGetValue(kind, out var existing))
+            if (recovery.TryGetValue(key, out var existing))
             {
                 var status = active.Status(now);
                 // StartRecording returning is not proof of acquisition. Close the gap
@@ -111,7 +131,7 @@ internal sealed partial class RecorderEngine
                 if (status.SampleCount > 0 && status.Health is "capturing-signal" or "acquired-silence")
                 {
                     if (existing.GapId is not null) store!.CloseGap(existing.GapId, status.LastHeartbeatTicks);
-                    recovery.Remove(kind);
+                    recovery.Remove(key);
                     return;
                 }
                 // A restarted microphone must produce callbacks. Playback can be
@@ -124,9 +144,9 @@ internal sealed partial class RecorderEngine
             }
             else return;
         }
-        if (!recovery.TryGetValue(kind, out var attempt))
+        if (!recovery.TryGetValue(key, out var attempt))
         {
-            recovery[kind] = attempt = new RecoveryAttempt();
+            recovery[key] = attempt = new RecoveryAttempt();
             attempt.GapId = store!.OpenGap(kind, "endpoint-unavailable", now, fence.Generation).GapId;
         }
         if (permanentlyFailed.Contains(kind) || attempt.Attempts >= 6 || now < attempt.NextTicks) return;

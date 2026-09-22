@@ -26,6 +26,24 @@ public sealed class CaptureCutoffTests
                 SampleRate));
     }
 
+    // Rees's FIFINE (2026-09-22): position jumped 8,895,840 frames forward on a discontinuity
+    // while callbacks kept arriving every 10 ms and every frame was persisted. That is a
+    // counter reset, not 185 s of lost audio, and must not be reported as loss.
+    [Theory]
+    [InlineData(8_895_840, 10, 480, 0)]
+    [InlineData(8_895_840, 185_340, 480, 8_895_840)]
+    [InlineData(8_895_840, 30, 480, 960)]
+    [InlineData(100, 30, 480, 100)]
+    [InlineData(0, 30, 480, 0)]
+    [InlineData(100, 0, 480, 0)]
+    public void DiscontinuityLossIsClaimedOnlyWhereTheClockCorroboratesIt(
+        long positionGap, long elapsedMs, int packetFrames, long expectedLost)
+    {
+        Assert.Equal(
+            expectedLost,
+            CaptureTrack.CorroboratedLoss(positionGap, elapsedMs * TimelineClock.Frequency / 1000, packetFrames, SampleRate));
+    }
+
     [Fact]
     public void PauseFenceKeepsStraddlingFrameWhoseTimestampPrecedesCutoff()
     {

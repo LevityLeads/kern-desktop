@@ -26,7 +26,8 @@ internal interface ICaptureBackend
 {
     event EventHandler? Changed;
     DeviceList List();
-    HashSet<string> DefaultRenderIds();
+    /// <summary>Every playback endpoint the session should capture: all active render endpoints.</summary>
+    HashSet<string> RenderIds();
     HashSet<string> ActiveCaptureIds();
     string ResolveMicrophoneId(MicrophoneSelection selection);
     IReadOnlyList<string> DefaultRoles(string id, string kind);
@@ -39,7 +40,7 @@ internal sealed class WasapiCaptureBackend(AudioDevices devices) : ICaptureBacke
 {
     public event EventHandler? Changed { add => devices.Changed += value; remove => devices.Changed -= value; }
     public DeviceList List() => devices.List();
-    public HashSet<string> DefaultRenderIds() => devices.DefaultRenderIds();
+    public HashSet<string> RenderIds() => devices.ActiveRenderIds();
     public HashSet<string> ActiveCaptureIds() => devices.ActiveCaptureIds();
     public string ResolveMicrophoneId(MicrophoneSelection selection)
     {

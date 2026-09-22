@@ -51,65 +51,14 @@ internal sealed class AudioDevices : IDisposable
             Enumerate(DataFlow.Capture, defaults));
     }
 
-    public IReadOnlyList<MMDevice> ActiveRenderDevices()
-    {
-        using var collection = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-        // Each collection index access returns a fresh disposable snapshot wrapper.
-        // The snapshot is only used to read the endpoint ID; the caller-owned device
-        // is opened separately via GetDevice, so the snapshot must be disposed here.
-        var result = new List<MMDevice>();
-        try
-        {
-            for (var i = 0; i < collection.Count; i++)
-            {
-                using var snapshot = collection[i];
-                result.Add(enumerator.GetDevice(snapshot.ID));
-            }
-        }
-        catch
-        {
-            foreach (var opened in result) opened.Dispose();
-            throw;
-        }
-        return result;
-    }
-
-    // Only the default playback device (the multimedia default, i.e. what the user
-    // actually hears) is captured, plus the microphone. Virtual and idle endpoints
-    // (VB-Cable, Steam, Oculus, etc.) and the separate communications default are not
-    // captured, keeping a call to two real tracks: you and the other side.
-    public IReadOnlyList<MMDevice> DefaultRenderDevices()
-    {
-        var result = new List<MMDevice>();
-        try
-        {
-            if (enumerator.TryGetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia, out var snapshot))
-            {
-                string id;
-                using (snapshot) id = snapshot.ID;
-                var device = enumerator.GetDevice(id);
-                if (device.State == DeviceState.Active) result.Add(device);
-                else device.Dispose();
-            }
-        }
-        catch
-        {
-            foreach (var opened in result) opened.Dispose();
-            throw;
-        }
-        return result;
-    }
-
-    public HashSet<string> DefaultRenderIds()
-    {
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        if (enumerator.TryGetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia, out var device))
-            using (device) ids.Add(device.ID);
-        return ids;
-    }
-
     public MMDevice OpenDevice(string endpointId) => enumerator.GetDevice(endpointId);
 
+    // Every active playback endpoint is captured, not just the multimedia default. A call app
+    // renders wherever it likes: Teams and Zoom use the communications default, Chrome the
+    // multimedia default, and all of them let the user pick a device in-app. Capturing only
+    // one default lost the far side of a call whenever those disagreed. An idle endpoint
+    // emits no loopback packets in event mode and sustained silence is never written, so the
+    // extra tracks cost nothing on disk.
     public HashSet<string> ActiveRenderIds() => ActiveEndpointIds(DataFlow.Render);
 
     public HashSet<string> ActiveCaptureIds() => ActiveEndpointIds(DataFlow.Capture);

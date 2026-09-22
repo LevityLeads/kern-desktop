@@ -68,6 +68,11 @@ internal sealed record DeviceList(
     IReadOnlyList<EndpointInfo> RenderEndpoints,
     IReadOnlyList<EndpointInfo> CaptureEndpoints);
 
+// An active playback endpoint that refused loopback capture when the session started. It is
+// left out of the session (never retried) so one broken virtual driver cannot stop a call
+// from being recorded on the endpoints that work, and the manifest says which one was skipped.
+internal sealed record SkippedEndpoint(string EndpointId, string Kind, string Reason);
+
 internal sealed record TrackFormat(
     int SampleRate,
     int Channels,
@@ -141,6 +146,7 @@ internal sealed class SessionManifest
     // missing side of a call can be traced to routing (the call app played elsewhere) from the
     // manifest alone.
     public DeviceList? DevicesAtStart { get; init; }
+    public List<SkippedEndpoint> SkippedEndpoints { get; init; } = [];
     public List<TrackManifest> Tracks { get; init; } = [];
     public List<SegmentManifest> Segments { get; init; } = [];
     public List<GapManifest> Gaps { get; init; } = [];

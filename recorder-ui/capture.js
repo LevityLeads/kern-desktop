@@ -53,7 +53,11 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
     el.tracks.classList.toggle('empty', tracks.length === 0);
     if (!tracks.length) { el.tracks.textContent = 'No active devices.'; return; }
     const template = byId('track-template');
-    for (const track of tracks) {
+    // Every active playback endpoint is captured, so a PC with nine of them would list nine
+    // rows. Only endpoints that have delivered audio get a row; the idle ones share one line.
+    const idle = tracks.filter(track => track.kind === 'render' && !(track.counters?.packets > 0) && !track.message);
+    const listed = tracks.filter(track => !idle.includes(track));
+    for (const track of listed) {
       const node = template.content.cloneNode(true);
       node.querySelector('.track-name').textContent = track.name || track.trackId;
       node.querySelector('.track-health').textContent = String(track.health || 'unknown').replaceAll('-', ' ');
@@ -65,6 +69,14 @@ window.createCaptureView = function createCaptureView({ api, reportError, onStop
       if (track.droppedFrames) detail.push(`${track.droppedFrames} dropped`);
       if (track.message) detail.push(track.message);
       node.querySelector('.track-detail').textContent = detail.join(' · ');
+      el.tracks.append(node);
+    }
+    if (idle.length) {
+      const node = template.content.cloneNode(true);
+      node.querySelector('.track-name').textContent = `${idle.length} idle playback device${idle.length === 1 ? '' : 's'}`;
+      node.querySelector('.track-health').textContent = 'listening';
+      node.querySelector('.track-meter').value = 0;
+      node.querySelector('.track-detail').textContent = idle.map(track => track.name || track.trackId).join(', ');
       el.tracks.append(node);
     }
   }

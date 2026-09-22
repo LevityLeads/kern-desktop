@@ -80,7 +80,7 @@ function liveRenderer(dir, { calls = [], onSpawn = null, deferKill = false } = {
   };
 }
 // Records every API request and signed PUT; routes are the live and post-call contract.
-function fakeCloud(t, { windowsStatus = 200, callState = 'live' } = {}) {
+function fakeCloud(t, { windowsStatus = 200, callState = 'live', status = {} } = {}) {
   const requests = [], puts = [];
   const session = { fetch: async (url, init) => {
     const route = new URL(url).pathname;
@@ -94,7 +94,7 @@ function fakeCloud(t, { windowsStatus = 200, callState = 'live' } = {}) {
     }
     if (route === `/api/calls/${REMOTE}/upload`) return json({ signedUrl: `${STORAGE}/storage/v1/object/upload/sign/calls/${body.objectId}?token=t` });
     if (route === `/api/calls/${REMOTE}/live-finalize`) return json({ id: REMOTE, state: 'validating' });
-    if (route === `/api/calls/${REMOTE}`) return json({ id: REMOTE, state: callState });
+    if (route === `/api/calls/${REMOTE}`) return json({ id: REMOTE, state: callState, ...status });
     return new Response('', { status: 404 });
   } };
   const realFetch = globalThis.fetch;
@@ -295,6 +295,39 @@ test('processCall after a live call uploads only new objects and seals through l
   assert.equal(sealed[0].body.durationMs, 135000);
   assert.deepEqual(sealed[0].body.objects.map(o => o.id), [...originals, windowId(0), windowId(1), windowId(2, sampleCount)]);
   assert.deepEqual(state.uploaded, [windowId(0), windowId(1), ...originals, windowId(2, sampleCount)]);
+});
+
+test('polling a transcribing call surfaces the worker error, attempt count and window progress instead of a silent wait', async t => {
+  // Rees's 2026-09-22 call sat on "transcribing" for 40 minutes while the worker failed the
+  // same window seven times. The status carried the reason the whole time; it was never shown.
+  const root = tmp();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, SESSION), { recursive: true });
+  const cloud = fakeCloud(t, { callState: 'transcribing',
+    status: { windowCount: 6, errorCode: 'provider_invalid', job: { stage: 'transcribe', cursor: 2, attempts: 7, errorCode: 'provider_invalid', nextAttemptAt: null } } });
+  const processor = processorFor(t, root, cloud.session, () => { throw new Error('no render during a cloud poll'); });
+  await processor.store.save({ ...fresh(SESSION), state: 'transcribing', consent: true, requested: true, origin: ORIGIN,
+    ownerId: 'owner-1', storageOrigin: STORAGE, remoteId: REMOTE, uploadFinalized: true, durationMs: 337290, fingerprint: 'f'.repeat(64) });
+  processor.schedule(SESSION);
+  await processor.running;
+  const state = await processor.store.load(SESSION);
+  assert.equal(state.state, 'transcribing');
+  assert.equal(state.processingStage, 'cloud-transcribing');
+  assert.equal(state.errorCode, 'provider_invalid');
+  assert.equal(state.error, "Kern's transcription worker hit provider_invalid (attempt 7 of 8, window 3 of 6) and is retrying.");
+  assert.equal(state.progress, 2 / 6);
+  const shown = await processor.getCall(SESSION);
+  assert.equal(shown.errorCode, 'provider_invalid');
+  assert.equal(shown.processingStage, 'cloud-transcribing');
+  // A clean poll clears the message rather than leaving a stale error on screen.
+  const clean = fakeCloud(t, { callState: 'transcribing', status: { windowCount: 6, job: { stage: 'transcribe', cursor: 5, attempts: 1, errorCode: null } } });
+  const quiet = processorFor(t, root, clean.session, () => { throw new Error('no render during a cloud poll'); });
+  quiet.schedule(SESSION);
+  await quiet.running;
+  const after = await quiet.store.load(SESSION);
+  assert.equal(after.error, null);
+  assert.equal(after.errorCode, null);
+  assert.equal(after.progress, 5 / 6);
 });
 
 test('onStarted launches a publisher and onStopped waits for its in-flight tick before scheduling', async t => {

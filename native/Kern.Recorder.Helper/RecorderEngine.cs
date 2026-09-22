@@ -84,12 +84,34 @@ internal sealed partial class RecorderEngine : IDisposable
             try
             {
                 pinnedMicrophoneId = devices.ResolveMicrophoneId(request.Microphone);
-                foreach (var endpointId in devices.DefaultRenderIds())
-                    AddTrack(endpointId, "render", request.SegmentDurationMs);
+                skippedRenderEndpoints.Clear();
+                foreach (var endpointId in devices.RenderIds())
+                {
+                    // One playback endpoint refusing loopback (a virtual driver, an exclusive-mode
+                    // stream) must not stop the call from being recorded on the ones that work.
+                    ICaptureTrack track;
+                    try { track = OpenTrack(endpointId, "render", request.SegmentDurationMs); }
+                    catch (Exception error)
+                    {
+                        SkipRenderEndpoint(endpointId, error.Message);
+                        continue;
+                    }
+                    RegisterTrack(track);
+                }
                 AddTrack(pinnedMicrophoneId, "microphone", request.SegmentDurationMs);
                 if (tracks.Count == 0) throw new ProtocolException("no-audio-devices", "No supported audio endpoint is available.");
 
-                foreach (var track in tracks.Where(track => !track.IsRetired)) track.Start();
+                foreach (var track in tracks.Where(track => !track.IsRetired).ToArray())
+                {
+                    try { track.Start(); }
+                    catch (Exception error) when (track.Kind == "render")
+                    {
+                        SkipRenderEndpoint(track.EndpointId, error.Message);
+                        try { track.RetireEndpoint(clock.NowTicks, error.Message); } catch { }
+                        track.Dispose();
+                    }
+                }
+                if (!tracks.Any(track => !track.IsRetired)) throw new ProtocolException("no-audio-devices", "No audio endpoint could be started.");
                 devicesChanged = true;
                 state = "recording";
                 store.SetState(state, 0, micMuted, fence.Generation);
@@ -277,23 +299,40 @@ internal sealed partial class RecorderEngine : IDisposable
             freeBytes,
             tracks.Select(track => track.Status(now)).ToList(),
             failure,
-            state == "recording" && (tracks.Any(t => t.IsRetired) || tracks.Any(t => t.Status(now).DroppedFrames > 0))
+            state == "recording" && (tracks.Any(t => t.IsRetired && !skippedRenderEndpoints.Contains(t.EndpointId)) ||
+                tracks.Any(t => t.Status(now).DroppedFrames > 0))
                 ? "Recording continues. Some earlier audio is missing."
                 : null);
     }
 
     private ICaptureTrack AddTrack(string endpointId, string kind, int segmentDurationMs)
     {
-        var track = devices.CreateTrack(endpointId, kind,
+        var track = OpenTrack(endpointId, kind, segmentDurationMs);
+        RegisterTrack(track);
+        return track;
+    }
+
+    // Opening the device and registering it with the session are separate steps so a device
+    // that refuses to open is reported as skipped, while a session-store failure stays fatal.
+    private ICaptureTrack OpenTrack(string endpointId, string kind, int segmentDurationMs) =>
+        devices.CreateTrack(endpointId, kind,
             store is null ? throw new InvalidOperationException("Session store is unavailable.") : store.SessionPath,
             clock, segmentDurationMs, fence, segment => store.AddSegment(segment), OnTrackFailure);
+
+    private void RegisterTrack(ICaptureTrack track)
+    {
         try
         {
-            store.AddTrack(track.ToManifest());
+            store!.AddTrack(track.ToManifest());
             tracks.Add(track);
-            return track;
         }
         catch { track.Dispose(); throw; }
+    }
+
+    private void SkipRenderEndpoint(string endpointId, string reason)
+    {
+        skippedRenderEndpoints.Add(endpointId);
+        store!.AddSkippedEndpoint(new SkippedEndpoint(endpointId, "render", reason));
     }
 
     // Consecutive failed ticks (250 ms apart) before a metadata persistence problem
