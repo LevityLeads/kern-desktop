@@ -34,7 +34,6 @@ internal sealed class CallSession : IDisposable
     public string StartedAtUtc { get; }
     public string? EndedAtUtc { get; private set; }
     public string State { get; private set; } = "recording";
-    public string PlaybackMode => DevicesMode;
     public CaptureFailure? Failure { get; private set; }
     public bool IsActive => State is "recording" or "paused";
     public bool IsPaused => openPause is not null;
@@ -81,14 +80,14 @@ internal sealed class CallSession : IDisposable
 
     public SessionDocument Document(ProducerInfo producer, long nowTicks) => new(
         SessionDocument.FormatName, Id, State, StartedAtUtc, EndedAtUtc, CallAudio.SampleRate, CallAudio.Channels,
-        CallAudio.LaneNames, Commit.CommittedFrames, producer, PlaybackMode,
+        CallAudio.LaneNames, Commit.CommittedFrames, producer, DevicesMode,
         Sources.Slots.Select(slot => slot.Record(nowTicks)).ToList(),
         pauses.Select(entry => new PauseSpan(entry.StartFrame, entry.EndFrame, entry.Reason)).ToList(),
         Failure);
 
     public RecorderStatus Status(long nowTicks) => new(
         State, Id, StartedAtUtc, Clock.ElapsedMilliseconds(endedTicks ?? nowTicks), Commit.CommittedFrames, MicMuted,
-        PlaybackMode, Sources.Slots.Select(slot => slot.Status(nowTicks)).ToList(), Failure, Warning());
+        DevicesMode, Sources.Slots.Select(slot => slot.Status(nowTicks)).ToList(), Failure, Warning());
 
     // The one thing the user should know right now, most important first.
     private string? Warning()
