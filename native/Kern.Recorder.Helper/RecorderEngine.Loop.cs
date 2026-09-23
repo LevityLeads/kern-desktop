@@ -33,7 +33,7 @@ internal sealed partial class RecorderEngine
             var changed = active.Sources.Maintain(now);
             var housekeeping = now >= active.NextHousekeepingTicks;
             if (housekeeping) active.NextHousekeepingTicks = now + HousekeepingInterval;
-            if (active.PlaybackMode == CallSession.DevicesMode && (Interlocked.Exchange(ref devicesChanged, 0) == 1 || housekeeping))
+            if (Interlocked.Exchange(ref devicesChanged, 0) == 1 || housekeeping)
                 changed |= ReconcileEndpoints(active, now);
             if (housekeeping && IsLowOnDisk(active))
                 status = EndLocked(active, "interrupted", new CaptureFailure("low-storage",

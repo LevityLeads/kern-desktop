@@ -18,16 +18,14 @@ internal interface ICaptureSource : IDisposable
 
 internal sealed class WasapiCaptureSource : ICaptureSource
 {
-    public const string ProcessLoopbackName = "All apps except Kern";
-
     private readonly WasapiRecorder recorder;
-    private readonly MMDevice? device;
+    private readonly MMDevice device;
     private PacketHandler? onPacket;
     private Action<Exception>? onFailed;
     private int failed;
     private int disposed;
 
-    private WasapiCaptureSource(WasapiRecorder recorder, MMDevice? device, string name)
+    private WasapiCaptureSource(WasapiRecorder recorder, MMDevice device, string name)
     {
         this.recorder = recorder;
         this.device = device;
@@ -51,19 +49,6 @@ internal sealed class WasapiCaptureSource : ICaptureSource
             device.Dispose();
             throw;
         }
-    }
-
-    // Everything every app renders, on every endpoint, minus the Electron process tree, so
-    // Kern's own sounds never reach the "them" lane. Windows 10 2004+; the caller falls back
-    // to per-endpoint loopback when activation throws.
-    public static async Task<WasapiCaptureSource> OpenProcessLoopbackAsync(int excludedProcessId)
-    {
-        var recorder = await new WasapiRecorderBuilder()
-            .WithProcessLoopback((uint)excludedProcessId, ProcessLoopbackMode.ExcludeTargetProcessTree)
-            .WithFormat(WaveFormat.CreateIeeeFloatWaveFormat(48_000, 2))
-            .BuildAsync()
-            .ConfigureAwait(false);
-        return new WasapiCaptureSource(recorder, null, ProcessLoopbackName);
     }
 
     public void Start(PacketHandler onPacket, Action<Exception> onFailed)
@@ -102,6 +87,6 @@ internal sealed class WasapiCaptureSource : ICaptureSource
         try { if (recorder.CaptureState != CaptureState.Stopped) recorder.StopRecording(); }
         catch { }
         recorder.Dispose();
-        device?.Dispose();
+        device.Dispose();
     }
 }

@@ -32,8 +32,8 @@ v2 has one rule: every source is converted to 16 kHz mono on arrival and summed 
   "lanes": ["me", "them"],
   "committedFrames": 0,
   "producer": { "app": "1.1.0-capture.N+sha", "helper": "2.0.0.0", "protocol": 2 },
-  "playbackMode": "all-apps | devices",
-  "sources": [ { "id": "...", "lane": "me|them", "name": "...", "mode": "microphone|process-loopback|endpoint-loopback",
+  "playbackMode": "devices",
+  "sources": [ { "id": "...", "lane": "me|them", "name": "...", "mode": "microphone|endpoint-loopback",
                  "state": "active|idle|recovering|failed", "message": null,
                  "stats": { "packets": 0, "inputFrames": 0, "outputFrames": 0, "gaps": 0, "gapFrames": 0, "lateFrames": 0, "resyncs": 0, "droppedFrames": 0 } } ],
   "pauses": [ { "startFrame": 0, "endFrame": null, "reason": "user|mute|suspend" } ],
@@ -51,12 +51,12 @@ Deleted: the `--render` CLI and every `Render*`/`CallRenderer*` file, `SegmentWr
 
 Commands (payloads strict, unknown properties rejected, as today): `hello`, `ping`, `list-devices`, `start`, `pause`, `resume`, `mute-mic`, `unmute-mic`, `suspend`, `stop`, `shutdown`.
 
-- `start` payload: `{ sessionId, sessionPath, microphone: { mode: "default"|"device", deviceId? } }`. The excluded process is the `--parent-pid` the helper was launched with (the Electron main process), so Kern's own audio never lands in "them".
+- `start` payload: `{ sessionId, sessionPath, microphone: { mode: "default"|"device", deviceId? } }`.
 - `status` event, emitted every 500 ms while a session is active and on every change:
 
 ```json
 { "state": "recording", "sessionId": "...", "startedAtUtc": "...", "elapsedMs": 0, "committedFrames": 0,
-  "micMuted": false, "playbackMode": "all-apps",
+  "micMuted": false, "playbackMode": "devices",
   "sources": [ { "id": "...", "lane": "me", "name": "Microphone (FIFINE K670)", "mode": "microphone",
                  "state": "active", "level": 0.0, "message": null, "stats": { } } ],
   "failure": null, "warning": null }
@@ -67,8 +67,8 @@ Commands (payloads strict, unknown properties rejected, as today): `hello`, `pin
 ### Sources
 
 - Microphone: `WasapiRecorderBuilder().WithDevice(mic).WithSharedMode().WithEventSync()`, device mix format.
-- Playback, preferred: process loopback, `WithProcessLoopback(parentPid, ProcessLoopbackMode.ExcludeTargetProcessTree).WithFormat(IEEE float 48 kHz stereo).BuildAsync()`. One stream of everything every app renders, on every device, minus Kern. This removes the "which playback device did Teams use" problem entirely (Windows 10 2004+).
-- Playback, fallback when process loopback fails to activate: endpoint loopback on every active render endpoint, one source each, reconciled on device-change notifications. `playbackMode` says which is in use.
+- Playback: endpoint loopback on every active render endpoint, one source each, reconciled on device-change notifications and on a 2 s housekeeping pass (a Bluetooth headset switching to hands-free appears as a new endpoint, sometimes without a notification). Idle endpoints deliver no packets, so extra sources cost nothing.
+- Process loopback (`ActivateAudioInterfaceAsync`, exclude-Kern mode) is deliberately not used. For some apps, the new Teams client among them, it activates, initializes and starts cleanly and then delivers only zeros, so there is no failure to fall back on. Build 27 recorded a 28-minute call (recording `9018ccf2`) with the "them" lane 100% digital silence that way. The same behaviour is reported for Microsoft's ApplicationLoopback sample and OBS per-app capture (fastrepl/anarlog PR #7590). The cost of endpoint loopback is that anything Kern itself plays would reach "them"; the desktop plays no audio.
 - A source that stops with an error, or whose device disappears, goes to `recovering` and is reopened every 2 s (microphone: the same selection, falling back to the default communications microphone if the chosen one is gone, with a warning). Nothing a source does can stop the session.
 
 ### Conversion (pure, unit-tested)

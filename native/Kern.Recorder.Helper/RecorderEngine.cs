@@ -23,18 +23,16 @@ internal sealed partial class RecorderEngine : IDisposable
     private readonly object gate = new();
     private readonly ICaptureBackend backend;
     private readonly TimelineClock clock;
-    private readonly int excludedProcessId;
     private readonly RecorderEngineOptions options;
     private CallSession? session;
     private CancellationTokenSource? loopCancellation;
     private int devicesChanged;
     private bool disposed;
 
-    public RecorderEngine(ICaptureBackend backend, TimelineClock clock, int excludedProcessId, RecorderEngineOptions? options = null)
+    public RecorderEngine(ICaptureBackend backend, TimelineClock clock, RecorderEngineOptions? options = null)
     {
         this.backend = backend;
         this.clock = clock;
-        this.excludedProcessId = excludedProcessId;
         this.options = options ?? new RecorderEngineOptions();
         backend.DevicesChanged += OnDevicesChanged;
     }

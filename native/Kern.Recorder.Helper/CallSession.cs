@@ -4,7 +4,8 @@ namespace Kern.Recorder.Helper;
 // Guarded by the engine lock; only the pipelines and the commit loop are touched off it.
 internal sealed class CallSession : IDisposable
 {
-    public const string AllAppsMode = "all-apps";
+    // The only playback mode: loopback on every active render endpoint. Kept in the protocol so
+    // the desktop can tell this helper from one that captured the far side another way.
     public const string DevicesMode = "devices";
 
     private readonly List<PauseEntry> pauses = [];
@@ -33,7 +34,7 @@ internal sealed class CallSession : IDisposable
     public string StartedAtUtc { get; }
     public string? EndedAtUtc { get; private set; }
     public string State { get; private set; } = "recording";
-    public string PlaybackMode { get; set; } = AllAppsMode;
+    public string PlaybackMode => DevicesMode;
     public CaptureFailure? Failure { get; private set; }
     public bool IsActive => State is "recording" or "paused";
     public bool IsPaused => openPause is not null;
@@ -98,9 +99,7 @@ internal sealed class CallSession : IDisposable
             return "Microphone disconnected. Reconnecting.";
         if (MicFallback) return "Chosen microphone is unavailable. Recording from the default microphone.";
         var playback = slots.Where(slot => slot.Lane == CallAudio.ThemLane).ToList();
-        if (PlaybackMode == AllAppsMode && playback.Any(slot => slot.State == SourceSlot.Condition.Recovering))
-            return "Call audio capture stopped. Reconnecting.";
-        if (PlaybackMode == DevicesMode && !playback.Any(slot => slot.State == SourceSlot.Condition.Open))
+        if (!playback.Any(slot => slot.State == SourceSlot.Condition.Open))
             return "No playback device is available. Only the microphone is being recorded.";
         if (SessionFileFailing) return "Recording details could not be saved. Audio is still being recorded.";
         if (slots.Any(slot => slot.Pipeline.Stats().DroppedFrames > 0)) return "Some audio could not be recorded.";

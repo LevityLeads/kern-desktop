@@ -96,7 +96,7 @@ public sealed class ProtocolTests
     public void StatusSerialisesToTheProtocolTwoShapeWithExplicitNulls()
     {
         var status = new RecorderStatus("recording", "f0b03de7-d139-4c32-b92f-7c5bdd57a9f5", "2026-09-22T09:00:00.0000000+00:00",
-            1500, 800, false, "all-apps",
+            1500, 800, false, "devices",
             [new SourceStatus("microphone", "me", "Microphone (FIFINE K670)", "microphone", "active", 0.42, null,
                 new SourceStats(150, 72_000, 24_000, 0, 0, 0, 0, 0))],
             null, null);

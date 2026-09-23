@@ -7,25 +7,22 @@ namespace Kern.Recorder.Helper;
 internal sealed partial class RecorderEngine
 {
     private const string MicrophoneMode = "microphone";
-    private const string ProcessLoopbackMode = "process-loopback";
     private const string EndpointLoopbackMode = "endpoint-loopback";
 
     // Called under the engine lock before the session is published, and every source failure
     // after that is contained by SourceSet, so no source can prevent or end a recording.
+    //
+    // The far side is endpoint loopback on every active render endpoint, followed as devices
+    // come and go. Process loopback (ActivateAudioInterfaceAsync, exclude-Kern mode) is not
+    // used: for some apps, the new Teams client among them, it activates, initializes and starts
+    // cleanly and then delivers nothing but zeros, so there is no failure to fall back on.
+    // Build 27 recorded a 28-minute call that way with the "them" lane 100% digital silence.
+    // Endpoint loopback hears whatever reaches a device, whichever device the call app chose.
     private void OpenSources(CallSession active)
     {
         var now = clock.NowTicks;
         active.Sources.Add(new SourceSlot("microphone", CallAudio.MeLane, MicrophoneMode, "Microphone",
             new SourcePipeline(CallAudio.MeLane, active.Clock, active.Mixer), () => OpenMicrophone(active)), now);
-
-        var playback = new SourceSlot("playback", CallAudio.ThemLane, ProcessLoopbackMode, WasapiCaptureSource.ProcessLoopbackName,
-            new SourcePipeline(CallAudio.ThemLane, active.Clock, active.Mixer), () => backend.OpenProcessLoopback(excludedProcessId));
-        if (active.Sources.TryAdd(playback, now))
-        {
-            active.PlaybackMode = CallSession.AllAppsMode;
-            return;
-        }
-        active.PlaybackMode = CallSession.DevicesMode;
         ReconcileEndpoints(active, now);
     }
 

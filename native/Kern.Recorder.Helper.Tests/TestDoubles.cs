@@ -69,7 +69,6 @@ internal sealed class FakeBackend : ICaptureBackend
 
     public List<FakeSource> Opened { get; } = [];
     public Dictionary<string, string> Endpoints { get; } = new(StringComparer.Ordinal);
-    public bool ProcessLoopbackWorks { get; set; } = true;
     public int MicrophoneFailuresLeft { get; set; }
     public HashSet<string> MissingMicrophones { get; } = [];
     public List<MicrophoneSelection> MicrophoneRequests { get; } = [];
@@ -91,12 +90,6 @@ internal sealed class FakeBackend : ICaptureBackend
         if (selection.DeviceId is string id && MissingMicrophones.Contains(id))
             throw new ProtocolException("microphone-unavailable", "Chosen microphone is unavailable.");
         return Track(new FakeSource(selection.Mode == "default" ? "Mic (default)" : $"Mic ({selection.DeviceId})", Format));
-    }
-
-    public ICaptureSource OpenProcessLoopback(int excludedProcessId)
-    {
-        if (!ProcessLoopbackWorks) throw new InvalidOperationException("Process loopback is not supported.");
-        return Track(new FakeSource(WasapiCaptureSource.ProcessLoopbackName, Format));
     }
 
     public IReadOnlyDictionary<string, string> ActiveRenderEndpoints() => new Dictionary<string, string>(Endpoints);

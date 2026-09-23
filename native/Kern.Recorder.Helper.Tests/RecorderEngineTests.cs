@@ -11,6 +11,8 @@ public sealed class RecorderEngineTests : IDisposable
     private const short ThemValue = -16384;
     private static readonly byte[] MePacket = Pcm.Int16(160, MeValue);
     private static readonly byte[] ThemPacket = Pcm.Int16(160, ThemValue);
+    private const string SpeakersId = "{speakers}";
+    private const string HeadsetId = "{airpods-hands-free}";
 
     private readonly string root = Path.Combine(Path.GetTempPath(), "kern-engine-" + Guid.NewGuid().ToString("N"));
     private readonly FakeClock clock = new();
@@ -23,7 +25,8 @@ public sealed class RecorderEngineTests : IDisposable
 
     public RecorderEngineTests()
     {
-        engine = new RecorderEngine(backend, clock.Timeline, 4242, new RecorderEngineOptions
+        backend.Endpoints[SpeakersId] = "Speakers";
+        engine = new RecorderEngine(backend, clock.Timeline, new RecorderEngineOptions
         {
             RunLoop = false,
             FreeSpace = _ => freeSpace,
@@ -39,8 +42,8 @@ public sealed class RecorderEngineTests : IDisposable
     {
         var started = engine.Start(Request());
         Assert.Equal("recording", started.State);
-        Assert.Equal("all-apps", started.PlaybackMode);
-        Assert.Equal(["microphone", "playback"], started.Sources.Select(source => source.Id));
+        Assert.Equal("devices", started.PlaybackMode);
+        Assert.Equal(["microphone", RecorderEngine.EndpointSourceId(SpeakersId)], started.Sources.Select(source => source.Id));
         Assert.Equal("recording", ReadSession().GetProperty("state").GetString());
 
         Run(TimeSpan.FromSeconds(3));
@@ -219,10 +222,8 @@ public sealed class RecorderEngineTests : IDisposable
     }
 
     [Fact]
-    public void WithoutProcessLoopbackEveryActiveEndpointIsCapturedAndFollowed()
+    public void EveryActiveEndpointIsCapturedAndFollowed()
     {
-        backend.ProcessLoopbackWorks = false;
-        backend.Endpoints["{speakers}"] = "Speakers";
         backend.Endpoints["{airpods}"] = "Headphones (AirPods)";
         var started = engine.Start(Request());
         Assert.Equal("devices", started.PlaybackMode);
@@ -249,10 +250,76 @@ public sealed class RecorderEngineTests : IDisposable
         Assert.Equal(4, engine.Snapshot().Sources.Count);
     }
 
+    // Build 27 regression: the far side played on a device other than the one Kern would have
+    // picked, while the default device delivered nothing but flagged-silent packets (the shape
+    // process loopback produced for a whole call). The call device must fill the "them" lane.
+    [Fact]
+    public void TheCallDeviceIsHeardWhileTheDefaultDeviceDeliversOnlySilence()
+    {
+        backend.Endpoints[HeadsetId] = "Headset (AirPods Hands-Free)";
+        engine.Start(Request());
+        Drive(TimeSpan.FromSeconds(3), source => source.Name switch
+        {
+            "Speakers" => (ThemPacket, true),
+            "Headset (AirPods Hands-Free)" => (ThemPacket, false),
+            _ => (MePacket, false),
+        });
+        engine.Stop(Control());
+
+        AssertSpan(File.ReadAllBytes(Path.Combine(SessionPath, "audio.pcm")), 0, 48_000, MeValue, ThemValue);
+        var sources = ReadSession().GetProperty("sources");
+        Assert.Equal(3, sources.GetArrayLength());
+        Assert.All(sources.EnumerateArray().Skip(1), source => Assert.Equal("endpoint-loopback", source.GetProperty("mode").GetString()));
+    }
+
+    // A Bluetooth headset switching to its hands-free profile mid-call appears as a new render
+    // endpoint, and not every driver raises a device notification for it. Housekeeping must
+    // find it within one pass (2 s) and its audio must land at the right time.
+    [Fact]
+    public void AnEndpointThatAppearsMidCallWithoutANotificationIsPickedUp()
+    {
+        engine.Start(Request());
+        Drive(TimeSpan.FromSeconds(1), source => source.Name == "Speakers" ? null : (MePacket, false));
+        backend.Endpoints[HeadsetId] = "Headset (AirPods Hands-Free)";
+        Drive(TimeSpan.FromSeconds(3), source => source.Name switch
+        {
+            "Speakers" => null,
+            "Headset (AirPods Hands-Free)" => (ThemPacket, false),
+            _ => (MePacket, false),
+        });
+
+        var headset = engine.Snapshot().Sources.Single(source => source.Id == RecorderEngine.EndpointSourceId(HeadsetId));
+        Assert.Equal("active", headset.State);
+        engine.Stop(Control());
+
+        var audio = File.ReadAllBytes(Path.Combine(SessionPath, "audio.pcm"));
+        AssertSpan(audio, 0, 16_000, MeValue, 0);
+        // Picked up by the housekeeping tick at 2.1 s at the latest.
+        AssertSpan(audio, 2_100 * 16, 64_000, MeValue, ThemValue);
+    }
+
+    // WASAPI loopback sends no packets at all while nothing renders. A quiet stretch must stay
+    // a hole of the same length, so the far side's next words line up with the microphone.
+    [Fact]
+    public void LoopbackSilenceLeavesAHoleOfTheRightLengthAndNoShift()
+    {
+        engine.Start(Request());
+        Drive(TimeSpan.FromSeconds(1), source => (source.Name == "Speakers" ? ThemPacket : MePacket, false));
+        Drive(TimeSpan.FromSeconds(2), source => source.Name == "Speakers" ? null : (MePacket, false));
+        Drive(TimeSpan.FromSeconds(1), source => (source.Name == "Speakers" ? ThemPacket : MePacket, false));
+        engine.Stop(Control());
+
+        var audio = File.ReadAllBytes(Path.Combine(SessionPath, "audio.pcm"));
+        Assert.Equal(64_000 * CallAudio.BytesPerFrame, audio.Length);
+        AssertSpan(audio, 0, 16_000, MeValue, ThemValue);
+        AssertSpan(audio, 16_000, 48_000, MeValue, 0);
+        AssertSpan(audio, 48_000, 64_000, MeValue, ThemValue);
+    }
+
     [Fact]
     public void WithNoPlaybackDeviceTheSessionStillRecordsTheMicrophone()
     {
-        backend.ProcessLoopbackWorks = false;
+        backend.Endpoints.Clear();
         var status = engine.Start(Request());
         Assert.Equal("recording", status.State);
         Assert.Equal("No playback device is available. Only the microphone is being recorded.", status.Warning);
@@ -261,7 +328,6 @@ public sealed class RecorderEngineTests : IDisposable
     [Fact]
     public void PublishesStatusEveryHalfSecondAndStaysFarBelowTheFrameLimit()
     {
-        backend.ProcessLoopbackWorks = false;
         for (var endpoint = 0; endpoint < 64; endpoint++)
             backend.Endpoints[$"{{0.0.0.00000000}}.{{{Guid.NewGuid()}}}"] = $"Speakers ({new string('x', 60)}) {endpoint}";
         engine.Start(Request());
@@ -289,6 +355,19 @@ public sealed class RecorderEngineTests : IDisposable
         engine.Start(Request(path: Path.Combine(root, "third")));
         Assert.Throws<ProtocolException>(() => engine.Start(Request(path: Path.Combine(root, "fourth"))));
         Assert.Throws<ProtocolException>(() => engine.SetMicMuted(true, Control() with { Muted = false }));
+    }
+
+    // Like Run, but each source's packet (and its silent flag) is chosen per source; null means
+    // the source delivers nothing for that 10 ms, as WASAPI loopback does while nothing plays.
+    private void Drive(TimeSpan duration, Func<FakeSource, (byte[] Packet, bool Silent)?> packetFor)
+    {
+        for (var step = 0; step < (int)Math.Round(duration.TotalMilliseconds / 10); step++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            foreach (var source in backend.Live.ToList())
+                if (packetFor(source) is { } packet) source.Emit(packet.Packet, packet.Silent);
+            if (++steps % 10 == 0) engine.Tick();
+        }
     }
 
     private void Run(TimeSpan duration)

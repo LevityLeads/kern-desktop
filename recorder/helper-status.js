@@ -9,9 +9,9 @@ const HELPER_STATES = new Set(['idle', 'recording', 'paused', 'stopped', 'interr
 // States in which the helper holds a running session.
 const LIVE_STATES = new Set(['recording', 'paused']);
 const SILENT_LEVELS = Object.freeze({ me: 0, them: 0 });
-const PLAYBACK_MODES = new Set(['all-apps', 'devices']);
-const SOURCE_ID = /^(?:microphone|playback|playback-[0-9a-f]{12})$/;
-const SOURCE_MODES = new Set(['microphone', 'process-loopback', 'endpoint-loopback']);
+const PLAYBACK_MODES = new Set(['devices']);
+const SOURCE_ID = /^(?:microphone|playback-[0-9a-f]{12})$/;
+const SOURCE_MODES = new Set(['microphone', 'endpoint-loopback']);
 const SOURCE_STATES = new Set(['active', 'idle', 'recovering', 'failed']);
 const FAILURE_CODE = /^[a-z][a-z0-9-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

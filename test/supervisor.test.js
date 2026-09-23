@@ -10,10 +10,10 @@ const { tempRoot } = require('./helpers');
 function helperStatus(sessionId, state, extra = {}) {
   return {
     state, sessionId, startedAtUtc: '2026-09-22T10:00:00.000Z', elapsedMs: 60000, committedFrames: 58 * 16000,
-    micMuted: false, playbackMode: 'all-apps', failure: null, warning: null,
+    micMuted: false, playbackMode: 'devices', failure: null, warning: null,
     sources: [
       { id: 'microphone', lane: 'me', name: 'FIFINE', mode: 'microphone', state: 'active', level: 0.4, message: null, stats: {} },
-      { id: 'playback', lane: 'them', name: 'All apps except Kern', mode: 'process-loopback', state: 'active', level: 0.2, message: null, stats: {} },
+      { id: 'playback-0123456789ab', lane: 'them', name: 'Speakers', mode: 'endpoint-loopback', state: 'active', level: 0.2, message: null, stats: {} },
     ],
     ...extra,
   };

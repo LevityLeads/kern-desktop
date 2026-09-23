@@ -17,7 +17,7 @@ internal sealed class HelperServer : IDisposable
     {
         this.options = options;
         devices = new AudioDevices();
-        engine = new RecorderEngine(new WasapiCaptureBackend(devices), new TimelineClock(), options.ParentProcessId) { AppBuild = options.AppBuild };
+        engine = new RecorderEngine(new WasapiCaptureBackend(devices), new TimelineClock()) { AppBuild = options.AppBuild };
         engine.StatusChanged += OnStatusChanged;
         devices.StartNotifications(shutdown.Token);
     }

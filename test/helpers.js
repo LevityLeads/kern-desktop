@@ -38,7 +38,7 @@ function writeSession(root, { id = SESSION, state = 'stopped', frames = 0, extra
     format: 'kern-call-audio/1', sessionId: id, state, startedAtUtc: '2026-09-22T10:00:00.000Z',
     endedAtUtc: state === 'stopped' ? '2026-09-22T10:02:00.000Z' : null, sampleRate: 16000, channels: 2,
     lanes: ['me', 'them'], committedFrames: frames, producer: { app: 'test', helper: '2.0.0.0', protocol: 2 },
-    playbackMode: 'all-apps', sources: [], pauses: [], failure: null,
+    playbackMode: 'devices', sources: [], pauses: [], failure: null,
   }));
   return dir;
 }
