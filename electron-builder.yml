@@ -9,6 +9,8 @@ directories:
 files:
   - main.js
   - preload.js
+  - browsers.js
+  - edit-menu.js
   - setup.html
   - setup-preload.js
   - package.json

@@ -1,9 +1,10 @@
 const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { availableBrowsers, launchBrowser, parseOpenRequest, isTrustedOrigin } = require('./browsers');
+const { attachEditMenu } = require('./edit-menu');
 
 // ------------------------------------------------------------------
 // Kern host resolution.
@@ -60,52 +61,12 @@ function normaliseKernUrl(input) {
 let kernUrl = null;
 
 // ------------------------------------------------------------------
-// Open external links in Google Chrome, not the OS default browser.
+// External links open in Google Chrome, not the OS default browser.
 // Falls back to the OS default (shell.openExternal) if Chrome isn't
-// found or fails to launch.
+// found or fails to launch. Browser discovery lives in browsers.js.
 // ------------------------------------------------------------------
-function launchChrome(url) {
-  const platform = process.platform;
-  let cmd;
-  let args;
-
-  if (platform === 'win32') {
-    const candidates = [
-      path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env['LOCALAPPDATA'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    ];
-    cmd = candidates.find((c) => {
-      try {
-        return c && fs.existsSync(c);
-      } catch {
-        return false;
-      }
-    });
-    if (!cmd) return false; // Chrome not installed, let caller fall back
-    args = [url];
-  } else if (platform === 'darwin') {
-    cmd = 'open';
-    args = ['-a', 'Google Chrome', url];
-  } else {
-    cmd = 'google-chrome';
-    args = [url];
-  }
-
-  try {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
-    // If the launch fails asynchronously (e.g. Chrome missing on
-    // mac/linux), fall back to the OS default browser.
-    child.once('error', () => shell.openExternal(url));
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function openExternalUrl(url) {
-  if (!launchChrome(url)) shell.openExternal(url);
+  if (!launchBrowser('chrome', url, () => shell.openExternal(url))) shell.openExternal(url);
 }
 
 // ------------------------------------------------------------------
@@ -271,6 +232,7 @@ function createSetupWindow(errorMessage) {
   });
 
   setupWindow.setMenuBarVisibility(false);
+  attachEditMenu(setupWindow.webContents);
 
   const query = {};
   const existing = store.get('kernUrl');
@@ -325,6 +287,37 @@ ipcMain.handle('kern-setup:cancel', () => {
 });
 
 // ------------------------------------------------------------------
+// Browser-choice API for the web app (window.electronAPI.openUrl and
+// availableBrowsers, see preload.js).
+//
+// The page is remote content, so these channels are a trust boundary:
+// the call must come from the main window's frame, at the configured
+// Kern origin, and the arguments are validated before anything is
+// launched. Anything that fails a check gets `false` / `[]`.
+// ------------------------------------------------------------------
+function isTrustedSender(event) {
+  try {
+    if (!kernUrl || !mainWindow || mainWindow.isDestroyed()) return false;
+    if (event.sender !== mainWindow.webContents) return false;
+    return isTrustedOrigin(event.senderFrame && event.senderFrame.url, kernUrl);
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle('kern:open-url', (event, url, browser) => {
+  if (!isTrustedSender(event)) return false;
+  const request = parseOpenRequest(url, browser);
+  if (!request) return false;
+  return launchBrowser(request.browser, request.href);
+});
+
+ipcMain.handle('kern:available-browsers', (event) => {
+  if (!isTrustedSender(event)) return [];
+  return availableBrowsers();
+});
+
+// ------------------------------------------------------------------
 // Window creation
 // ------------------------------------------------------------------
 function createWindow() {
@@ -374,6 +367,8 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
+
+  attachEditMenu(mainWindow.webContents);
 
   mainWindow.loadURL(kernUrl);
 

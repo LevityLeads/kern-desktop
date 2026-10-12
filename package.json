@@ -1,6 +1,6 @@
 {
   "name": "kern-desktop",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Electron desktop shell for Kern OS with Windows 11 Mica/Acrylic transparency",
   "main": "main.js",
   "author": {
@@ -11,6 +11,7 @@
   "private": true,
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/*.test.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
