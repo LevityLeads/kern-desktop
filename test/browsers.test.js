@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { parseOpenRequest, isTrustedOrigin, findBrowser, availableBrowsers, launchBrowser } = require('../browsers');
+const { parseOpenRequest, isTrustedOrigin, findBrowser, availableBrowsers, launchBrowser, isOutlookWebUrl } = require('../browsers');
 
 test('parseOpenRequest accepts http(s) with chrome or edge', () => {
   assert.deepEqual(parseOpenRequest('https://example.com/a?b=1', 'chrome'), { browser: 'chrome', href: 'https://example.com/a?b=1' });
@@ -81,6 +81,46 @@ test('linux: finds a browser on PATH and spawns it with an args array', { skip: 
     for (let i = 0; i < 50 && !fs.existsSync(marker); i++) await new Promise((r) => setTimeout(r, 20));
     assert.equal(fs.readFileSync(marker, 'utf8'), url + '\n');
     assert.equal(fs.existsSync(path.join(dir, 'pwned')), false);
+  } finally {
+    process.env.PATH = oldPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isOutlookWebUrl matches Outlook on the web hosts exactly, https only', () => {
+  const yes = [
+    'https://outlook.office365.com/owa/?ItemID=AAMk%2Babc&exvsurl=1&viewmodel=ReadMessageItem',
+    'https://outlook.office.com/mail/deeplink/compose/AAMk',
+    'https://outlook.cloud.microsoft/mail/inbox/id/AAMk',
+    'https://OUTLOOK.LIVE.COM/mail/0/',
+  ];
+  const no = [
+    'http://outlook.office365.com/owa/',
+    'https://outlook.office365.com.evil.com/owa/',
+    'https://evil.com/https://outlook.office.com/',
+    'https://office.com/',
+    'https://www.outlook.com/',
+    'mailto:someone@example.com',
+    'not a url',
+    undefined,
+  ];
+  for (const u of yes) assert.equal(isOutlookWebUrl(u), true, u);
+  for (const u of no) assert.equal(isOutlookWebUrl(u), false, String(u));
+});
+
+test('linux: appWindow passes --app=<url> as one argv element', { skip: process.platform !== 'linux' }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kd-browsers-'));
+  const marker = path.join(dir, 'argv.txt');
+  const fake = path.join(dir, 'microsoft-edge');
+  fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "${marker}"\n`, { mode: 0o755 });
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    const url = 'https://outlook.office365.com/owa/?ItemID=AAMk%2Babc&exvsurl=1';
+    assert.equal(launchBrowser('edge', url, undefined, { appWindow: true }), true);
+    for (let i = 0; i < 50 && !fs.existsSync(marker); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(fs.readFileSync(marker, 'utf8'), `--app=${url}\n`);
   } finally {
     process.env.PATH = oldPath;
     fs.rmSync(dir, { recursive: true, force: true });

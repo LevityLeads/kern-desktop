@@ -74,7 +74,7 @@ function findBrowser(name) {
       const base = process.env[c.env] || c.fallback;
       if (!base) continue;
       const exe = path.join(base, ...c.rel);
-      if (isFile(exe)) return { cmd: exe, argsFor: (url) => [url] };
+      if (isFile(exe)) return { cmd: exe, argsFor: (url, appWindow) => [appWindow ? `--app=${url}` : url] };
     }
     return null;
   }
@@ -83,12 +83,16 @@ function findBrowser(name) {
     const bundle = `${def.darwinApp}.app`;
     const dirs = ['/Applications', path.join(process.env.HOME || '', 'Applications')];
     if (!dirs.some((d) => isDir(path.join(d, bundle)))) return null;
-    return { cmd: 'open', argsFor: (url) => ['-a', def.darwinApp, url] };
+    return {
+      cmd: 'open',
+      argsFor: (url, appWindow) =>
+        appWindow ? ['-na', def.darwinApp, '--args', `--app=${url}`] : ['-a', def.darwinApp, url],
+    };
   }
 
   for (const command of def.linuxCommands) {
     const found = findOnPath(command);
-    if (found) return { cmd: found, argsFor: (url) => [url] };
+    if (found) return { cmd: found, argsFor: (url, appWindow) => [appWindow ? `--app=${url}` : url] };
   }
   return null;
 }
@@ -103,13 +107,16 @@ function availableBrowsers() {
  * process was spawned, false if the browser is missing or spawn threw.
  * `onError` fires if the process fails to start asynchronously, which
  * lets the caller fall back to the OS default browser.
+ * `options.appWindow` opens the URL as a standalone app window (Chromium's
+ * --app switch): no tabs, no address bar.
  */
-function launchBrowser(name, url, onError) {
+function launchBrowser(name, url, onError, options = {}) {
   const found = findBrowser(name);
   if (!found) return false;
 
   try {
-    const child = spawn(found.cmd, found.argsFor(url), { detached: true, stdio: 'ignore' });
+    const args = found.argsFor(url, !!options.appWindow);
+    const child = spawn(found.cmd, args, { detached: true, stdio: 'ignore' });
     child.once('error', () => {
       if (onError) onError();
     });
@@ -144,6 +151,32 @@ function parseOpenRequest(url, browser) {
   return { browser, href: parsed.href };
 }
 
+// ------------------------------------------------------------------
+// Outlook on the web links (Graph webLink, OWA deep links).
+//
+// New Outlook for Windows cannot be told to open a specific message from
+// outside: Microsoft documents only mailto and webcal for it, and no
+// olk.exe switch opens an item. These links open in Edge as an app window
+// instead, which is the same Outlook web app without browser chrome.
+// ------------------------------------------------------------------
+const OUTLOOK_WEB_HOSTS = new Set([
+  'outlook.office.com',
+  'outlook.office365.com',
+  'outlook.cloud.microsoft',
+  'outlook.live.com',
+]);
+
+/** True for an https URL on an Outlook on the web host (exact host match). */
+function isOutlookWebUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && OUTLOOK_WEB_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 /** True when `frameUrl` has exactly the origin of `expectedOrigin`. */
 function isTrustedOrigin(frameUrl, expectedOrigin) {
   if (typeof frameUrl !== 'string' || typeof expectedOrigin !== 'string') return false;
@@ -163,4 +196,5 @@ module.exports = {
   launchBrowser,
   parseOpenRequest,
   isTrustedOrigin,
+  isOutlookWebUrl,
 };

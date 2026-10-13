@@ -3,7 +3,13 @@ const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { availableBrowsers, launchBrowser, parseOpenRequest, isTrustedOrigin } = require('./browsers');
+const {
+  availableBrowsers,
+  launchBrowser,
+  parseOpenRequest,
+  isTrustedOrigin,
+  isOutlookWebUrl,
+} = require('./browsers');
 const { attachEditMenu } = require('./edit-menu');
 const { setupAutoUpdater } = require('./updater');
 
@@ -67,7 +73,11 @@ let kernUrl = null;
 // found or fails to launch. Browser discovery lives in browsers.js.
 // ------------------------------------------------------------------
 function openExternalUrl(url) {
-  if (!launchBrowser('chrome', url, () => shell.openExternal(url))) shell.openExternal(url);
+  const fallback = () => shell.openExternal(url);
+  // Outlook web links open in Edge as an app window (see browsers.js for why
+  // the Outlook app itself cannot take them). Anything else prefers Chrome.
+  if (isOutlookWebUrl(url) && launchBrowser('edge', url, fallback, { appWindow: true })) return;
+  if (!launchBrowser('chrome', url, fallback)) fallback();
 }
 
 // ------------------------------------------------------------------
@@ -388,7 +398,7 @@ function createWindow() {
   // and reopen setup instead of leaving a dead window on screen.
   // ------------------------------------
   mainWindow.webContents.on('did-navigate', (_event, url, httpResponseCode) => {
-    if (!kernUrl || !url.startsWith(kernUrl)) return;
+    if (!kernUrl || !isTrustedOrigin(url, kernUrl)) return;
     if (httpResponseCode && httpResponseCode >= 400) {
       createSetupWindow(
         `${kernUrl} answered ${httpResponseCode}. Check the address, or update it if the host has moved.`
@@ -498,7 +508,7 @@ function createWindow() {
   // Open external links in the default browser
   // ------------------------------------
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (kernUrl && url.startsWith(kernUrl)) {
+    if (kernUrl && isTrustedOrigin(url, kernUrl)) {
       return { action: 'allow' };
     }
     openExternalUrl(url);
@@ -507,7 +517,7 @@ function createWindow() {
 
   // Catch in-page navigations to external domains
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!kernUrl || !url.startsWith(kernUrl)) {
+    if (!kernUrl || !isTrustedOrigin(url, kernUrl)) {
       event.preventDefault();
       openExternalUrl(url);
     }
