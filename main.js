@@ -1,10 +1,11 @@
-const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain, powerMonitor, Notification } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { availableBrowsers, launchBrowser, parseOpenRequest, isTrustedOrigin } = require('./browsers');
 const { attachEditMenu } = require('./edit-menu');
+const { setupAutoUpdater } = require('./updater');
 
 // ------------------------------------------------------------------
 // Kern host resolution.
@@ -195,7 +196,13 @@ if (!gotLock) {
       createSetupWindow();
     }
     createTray();
-    setupAutoUpdater();
+    setupAutoUpdater({
+      autoUpdater,
+      app,
+      powerMonitor,
+      Notification,
+      getWindow: () => mainWindow,
+    });
   });
 }
 
@@ -572,33 +579,6 @@ function createTray() {
       mainWindow.focus();
     }
   });
-}
-
-// ------------------------------------------------------------------
-// Auto-updater (wired up, configured via electron-builder publish)
-// ------------------------------------------------------------------
-function setupAutoUpdater() {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-
-  autoUpdater.on('update-available', (info) => {
-    console.log('Update available:', info.version);
-  });
-
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('Update downloaded:', info.version);
-  });
-
-  autoUpdater.on('error', (err) => {
-    console.error('Auto-updater error:', err);
-  });
-
-  // Check for updates after a short delay (don't block startup)
-  setTimeout(() => {
-    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.error('Update check failed:', err);
-    });
-  }, 5000);
 }
 
 // ------------------------------------------------------------------

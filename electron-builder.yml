@@ -11,6 +11,7 @@ files:
   - preload.js
   - browsers.js
   - edit-menu.js
+  - updater.js
   - setup.html
   - setup-preload.js
   - package.json
