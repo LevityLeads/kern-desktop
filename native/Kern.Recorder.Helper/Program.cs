@@ -29,7 +29,7 @@ internal static class Program
         using var source = new WasapiMicSessionSource();
         var watch = new MicWatch(source, [Environment.ProcessId, parentPid], Console.Out.WriteLine, () => Environment.TickCount64);
         await watch.RunAsync(cancellationToken).ConfigureAwait(false);
-    });
+    }, CancellationToken.None);
 
     private static async Task<int> RunMicWatchAsync(string[] args)
     {
