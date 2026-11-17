@@ -14,9 +14,19 @@ function rig() {
 const teams = [{ pid: 10, name: 'ms-teams' }];
 
 test('constants match the plan', () => {
-  assert.deepEqual([...CALL_APPS], ['ms-teams', 'msteams', 'teams', 'zoom', 'chrome', 'msedge']);
+  assert.deepEqual([...CALL_APPS], ['ms-teams', 'ms-teams_modulehost', 'msteams', 'teams', 'zoom', 'chrome', 'msedge']);
   assert.equal(START_HOLD_MS, 3000);
   assert.equal(END_SILENCE_MS, 90000);
+});
+
+// New Teams moved its calling stack into a child process, ms-teams_modulehost.exe (Windows client
+// update, January 2026), so during a call that process, not ms-teams.exe, holds the mic session.
+test('new Teams calling host (ms-teams_modulehost) starts a call', () => {
+  const { detector, events } = rig();
+  const host = [{ pid: 11, name: 'ms-teams_modulehost' }];
+  detector.update(host, 0);
+  detector.update(host, 3000);
+  assert.deepEqual(events, [['started', 'ms-teams_modulehost']]);
 });
 
 test('an allowlisted app holding the mic for 3 s starts one call', () => {
