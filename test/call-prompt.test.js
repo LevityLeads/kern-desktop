@@ -15,12 +15,12 @@ function fakeCard({ throwOnShow = null } = {}) {
       if (throwOnShow) throw throwOnShow;
       this.shows.push(options);
       this.open = options;
+      return { close: () => { if (this.open === options) { this.closes += 1; this.open = null; } } };
     },
-    close() { this.closes += 1; this.open = null; },
     // What the card page does: one answer, then the window is gone.
     answer(choice, options = this.shows.at(-1)) {
       if (this.open === options) this.open = null;
-      return choice === 'record' ? options.onRecord() : options.onDismiss();
+      return choice === 'record' ? options.onPrimary() : options.onDismiss();
     },
   };
 }
@@ -45,13 +45,15 @@ function rig({ callPrompt = true, noticeAcknowledged = true, startImpl, card = f
   });
   const state = { callPrompt, noticeAcknowledged };
   const started = [];
+  const startOptions = [];
   const recorderShown = [];
   const clock = { t: 0 };
   const prompt = createCallPrompt({
     watcher, card, supervisor, Notification: FakeNotification, log: { error() {} },
     settings: { get: () => state },
-    start: startImpl || (async () => {
+    start: startImpl || (async (options) => {
       started.push(1);
+      startOptions.push(options);
       supervisor.sessionId = SESSION;
       supervisor.emit('started', { sessionId: SESSION });
       return { sessionId: SESSION };
@@ -63,7 +65,7 @@ function rig({ callPrompt = true, noticeAcknowledged = true, startImpl, card = f
   prompt.start();
   const mic = (apps, t) => { clock.t = t; watcher.emit('apps', apps); };
   const call = (name = 'ms-teams') => { mic([{ pid: 1, name }], 0); mic([{ pid: 1, name }], 3000); };
-  return { prompt, watcher, supervisor, card, notifications, started, recorderShown, state, mic, call, clock };
+  return { prompt, watcher, supervisor, card, notifications, started, startOptions, recorderShown, state, mic, call, clock };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -81,7 +83,9 @@ test('a call starting while idle shows one card naming the app, and no Windows n
   const r = rig();
   r.call('chrome');
   assert.equal(r.card.shows.length, 1);
-  assert.equal(r.card.shows[0].app, 'Chrome');
+  const { title, body, primary } = r.card.shows[0];
+  assert.deepEqual({ title, body, primary }, { title: 'Record this call?', body: 'Chrome is using your microphone.', primary: 'Record' });
+  assert.doesNotMatch(title + body + primary, /[–—]/);
   assert.equal(r.notifications.length, 0);
   assert.equal(r.started.length, 0);
 });
@@ -115,7 +119,7 @@ test('Not now holds for the rest of the call and the next call asks again', () =
   r.mic([{ pid: 2, name: 'zoom' }], 200000);
   r.mic([{ pid: 2, name: 'zoom' }], 203000);
   assert.equal(r.card.shows.length, 2);
-  assert.equal(r.card.shows[1].app, 'Zoom');
+  assert.equal(r.card.shows[1].body, 'Zoom is using your microphone.');
 });
 
 test('callPrompt off shows nothing and says why in diagnostics', () => {
@@ -149,7 +153,7 @@ test('a recording started from the window withdraws the open card, so a late Rec
   r.supervisor.emit('started', { sessionId: 'manual' });
   assert.equal(r.card.open, null);
   assert.equal(r.card.closes, 1);
-  shown.onRecord();
+  shown.onPrimary();
   await flush();
   assert.equal(r.started.length, 0);
   assert.match(r.prompt.diagnostics().last.outcome, /recording started elsewhere/);
@@ -213,7 +217,7 @@ test('call-ended withdraws an unanswered card so a late Record starts nothing', 
   const shown = r.card.shows[0];
   r.mic([], 3000 + 90000);
   assert.equal(r.card.open, null);
-  shown.onRecord();
+  shown.onPrimary();
   await flush();
   assert.equal(r.started.length, 0);
   assert.equal(r.prompt.diagnostics().last.outcome, 'withdrawn: call ended');
@@ -248,4 +252,63 @@ test('stop() stops the watcher and withdraws the card', () => {
   r.prompt.stop();
   assert.equal(r.watcher.stopped, true);
   assert.equal(r.card.open, null);
+});
+
+const ep = (name) => `{0.0.1.00000000}.{${name}}`;
+
+test('Record uses the microphone the call app is using', async () => {
+  const r = rig();
+  const holders = [{ pid: 4, name: 'svchost', endpoint: ep('webcam') }, { pid: 9, name: 'chrome', endpoint: ep('headset') }];
+  r.mic(holders, 0);
+  r.mic(holders, 3000);
+  r.card.answer('record');
+  await flush();
+  assert.deepEqual(r.startOptions, [{ microphone: { mode: 'device', deviceId: ep('headset') } }]);
+  assert.equal(r.prompt.diagnostics().last.microphone, ep('headset'));
+  assert.deepEqual(r.prompt.diagnostics().micHolders, [`svchost @ ${ep('webcam')}`, `chrome @ ${ep('headset')}`]);
+});
+
+test('a call app on two microphones, or on an unknown one, records the saved choice', async () => {
+  for (const holders of [
+    [{ pid: 9, name: 'chrome', endpoint: ep('a') }, { pid: 9, name: 'chrome', endpoint: ep('b') }],
+    [{ pid: 9, name: 'chrome', endpoint: null }],
+  ]) {
+    const r = rig();
+    r.mic(holders, 0);
+    r.mic(holders, 3000);
+    r.card.answer('record');
+    await flush();
+    assert.deepEqual(r.startOptions, [{}]);
+    assert.equal(r.prompt.diagnostics().last.microphone, 'saved choice');
+  }
+});
+
+test('when the call microphone will not open, Record falls back to the saved choice once', async () => {
+  const calls = [];
+  const r = rig({
+    startImpl: async (options) => {
+      calls.push(options);
+      if (options.microphone) throw new Error('device in use');
+      return { sessionId: SESSION };
+    },
+  });
+  const holders = [{ pid: 9, name: 'chrome', endpoint: ep('headset') }];
+  r.mic(holders, 0);
+  r.mic(holders, 3000);
+  r.card.answer('record');
+  await flush();
+  assert.deepEqual(calls, [{ microphone: { mode: 'device', deviceId: ep('headset') } }, {}]);
+  assert.equal(r.recorderShown.length, 0);
+  assert.match(r.prompt.diagnostics().last.microphone, /saved choice \(call microphone failed: device in use\)/);
+});
+
+test('withdrawing the record card never closes a newer card', () => {
+  const r = rig();
+  r.call();
+  const stale = r.card.shows[0];
+  r.card.open = { other: true }; // another owner's card replaced it
+  r.mic([], 3000 + 90000); // the call ends: the record card is withdrawn
+  assert.deepEqual(r.card.open, { other: true });
+  assert.equal(r.card.closes, 0);
+  assert.ok(stale);
 });

@@ -5,9 +5,10 @@ namespace Kern.Recorder.Helper.Tests;
 
 public sealed class MicWatchTests
 {
-    private sealed class FakeEndpoint(Func<IReadOnlyList<MicSession>> read) : IMicEndpoint
+    private sealed class FakeEndpoint(Func<IReadOnlyList<MicSession>> read, string id = "ep-1") : IMicEndpoint
     {
         public bool Disposed { get; private set; }
+        public string Id => id;
         public IReadOnlyList<MicSession> ActiveSessions() => read();
         public void Dispose() => Disposed = true;
     }
@@ -42,7 +43,33 @@ public sealed class MicWatchTests
         var rig = new Rig();
         rig.Sessions.Add(new MicSession(1234, "ms-teams"));
         rig.Watch.Poll();
-        Assert.Equal("""{"type":"mic","apps":[{"pid":1234,"name":"ms-teams"}]}""", Assert.Single(rig.Lines));
+        Assert.Equal("""{"type":"mic","apps":[{"pid":1234,"name":"ms-teams","endpoint":"ep-1"}]}""", Assert.Single(rig.Lines));
+    }
+
+    [Fact]
+    public void ListsEachEndpointAProcessHolds()
+    {
+        var headset = new FakeEndpoint(() => [new MicSession(9, "chrome")], "{0.0.1.00000000}.{headset}");
+        var webcam = new FakeEndpoint(() => [new MicSession(9, "chrome"), new MicSession(4, "svchost")], "{0.0.1.00000000}.{webcam}");
+        var lines = new List<string>();
+        var watch = new MicWatch(new FakeSource(() => new IMicEndpoint[] { webcam, headset }), [], lines.Add, () => 0);
+        watch.Poll();
+        var apps = JsonDocument.Parse(Assert.Single(lines)).RootElement.GetProperty("apps").EnumerateArray()
+            .Select(app => $"{app.GetProperty("pid").GetInt32()}:{app.GetProperty("endpoint").GetString()}").ToArray();
+        Assert.Equal(new[] { "4:{0.0.1.00000000}.{webcam}", "9:{0.0.1.00000000}.{headset}", "9:{0.0.1.00000000}.{webcam}" }, apps);
+    }
+
+    [Fact]
+    public void AnEndpointChangeIsAChange()
+    {
+        var id = "ep-a";
+        var lines = new List<string>();
+        var watch = new MicWatch(new FakeSource(() => new IMicEndpoint[] { new FakeEndpoint(() => [new MicSession(3, "zoom")], id) }), [], lines.Add, () => 0);
+        watch.Poll();
+        id = "ep-b";
+        watch.Poll();
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("ep-b", lines[1]);
     }
 
     [Fact]

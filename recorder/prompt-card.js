@@ -5,11 +5,12 @@ const { pathToFileURL } = require('url');
 
 // Keep in sync with recorder-ui/prompt-preload.js (test/prompt-card.test.js checks that it is).
 const CHANNEL = 'kern-call-prompt:choose';
-const CHOICES = Object.freeze(['record', 'dismiss']);
+const CHOICES = Object.freeze(['primary', 'dismiss']);
 const WIDTH = 400;
-const HEIGHT = 188;
+const HEIGHT = 200;
 const MARGIN = 16;
-const MAX_APP_LENGTH = 40;
+// What the page shows, cut here so a long device or app name can never push the buttons off the card.
+const LIMITS = Object.freeze({ title: 60, body: 150, primary: 24, secondary: 24 });
 
 function withoutQuery(url) {
   try {
@@ -20,11 +21,11 @@ function withoutQuery(url) {
   } catch { return null; }
 }
 
-// The "Record this call?" card: a small frameless window above every other window, a full-screen
-// call included, in the top-right corner of the screen the pointer is on. It never takes focus
-// from the call and stays until the user answers or the caller closes it. It replaces a Windows
-// notification, which Windows drops silently when notifications or Focus Assist are off.
-// One card at a time; showing a new one replaces the old one without answering it.
+// A Kern card: a small frameless window above every other window, a full-screen call included,
+// in the top-right corner of the screen the pointer is on, with one action and Not now. It never
+// takes focus from the call and stays until answered or closed. It replaces Windows notifications
+// for anything that must not be missed: Windows drops those silently when notifications or Focus
+// Assist are off. One card at a time; a new card replaces the old one without answering it.
 class PromptCard {
   constructor({ BrowserWindow, ipcMain, screen, appRoot, log = console }) {
     Object.assign(this, { BrowserWindow, ipcMain, screen, log });
@@ -41,23 +42,24 @@ class PromptCard {
     return Boolean(this.window && !this.window.isDestroyed());
   }
 
-  // app: the display name shown in the card. onRecord / onDismiss: called at most once, and never
-  // after close(). Closing the window by hand (Alt+F4) counts as dismiss.
-  show({ app, onRecord, onDismiss }) {
+  // onPrimary / onDismiss: called at most once, never after the card is closed or replaced.
+  // Closing the window by hand (Alt+F4) counts as dismiss. Returns a handle whose close()
+  // withdraws this card only, never a newer one.
+  show({ title, body, primary, secondary = 'Not now', onPrimary, onDismiss }) {
     this.close();
     const { x, y } = this.position();
     const window = new this.BrowserWindow({
       x, y, width: WIDTH, height: HEIGHT,
       show: false, frame: false, resizable: false, minimizable: false, maximizable: false,
       fullscreenable: false, skipTaskbar: true, alwaysOnTop: true,
-      title: 'Record this call?', backgroundColor: '#1c1c1c',
+      title: String(title ?? 'Kern'), backgroundColor: '#1c1c1c',
       webPreferences: {
         contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true,
         navigateOnDragDrop: false, preload: this.preload,
       },
     });
     this.window = window;
-    this.handlers = { record: onRecord, dismiss: onDismiss };
+    this.handlers = { primary: onPrimary, dismiss: onDismiss };
     // 'screen-saver' outranks a full-screen browser or Teams window; the default level does not.
     window.setAlwaysOnTop(true, 'screen-saver');
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -69,11 +71,14 @@ class PromptCard {
       this.window = null;
       this.answer('dismiss');
     });
-    window.loadFile(this.page, { query: { app: String(app ?? '').slice(0, MAX_APP_LENGTH) } })
-      .catch((error) => this.log.error('Call prompt card failed to load:', error?.message || error));
+    const text = { title, body, primary, secondary };
+    const query = Object.fromEntries(Object.entries(LIMITS).map(([key, max]) => [key, String(text[key] ?? '').slice(0, max)]));
+    window.loadFile(this.page, { query })
+      .catch((error) => this.log.error('Kern card failed to load:', error?.message || error));
+    return { close: () => { if (this.window === window) this.close(); } };
   }
 
-  // Withdraws the card without answering it.
+  // Withdraws the open card, whichever it is, without answering it.
   close() {
     const window = this.window;
     this.window = null;
@@ -101,7 +106,7 @@ class PromptCard {
   answer(choice) {
     const handler = this.handlers?.[choice];
     this.handlers = null;
-    try { handler?.(); } catch (error) { this.log.error('Call prompt card handler failed:', error?.message || error); }
+    try { handler?.(); } catch (error) { this.log.error('Kern card handler failed:', error?.message || error); }
   }
 
   position() {
@@ -113,4 +118,4 @@ class PromptCard {
   }
 }
 
-module.exports = { CHANNEL, CHOICES, HEIGHT, MARGIN, PromptCard, WIDTH };
+module.exports = { CHANNEL, CHOICES, HEIGHT, LIMITS, MARGIN, PromptCard, WIDTH };

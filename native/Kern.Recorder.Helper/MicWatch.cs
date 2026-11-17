@@ -24,7 +24,7 @@ internal sealed class MicWatch(
     // One pass. Emits at most one line.
     public void Poll()
     {
-        IReadOnlyList<MicSession> apps;
+        IReadOnlyList<MicHolder> apps;
         try { apps = Collect(); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -33,12 +33,12 @@ internal sealed class MicWatch(
             return;
         }
         failing = false;
-        var signature = string.Join(",", apps.Select(app => $"{app.Pid}:{app.Name}"));
+        var signature = string.Join(",", apps.Select(app => $"{app.Pid}:{app.Name}:{app.Endpoint}"));
         var now = nowMs();
         if (signature == lastSignature && now - lastEmitMs < HeartbeatMs) return;
         lastSignature = signature;
         lastEmitMs = now;
-        Write(new MicLine("mic", apps.Select(app => new MicApp(app.Pid, app.Name)).ToList()));
+        Write(new MicLine("mic", apps.Select(app => new MicApp(app.Pid, app.Name, app.Endpoint)).ToList()));
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -51,9 +51,10 @@ internal sealed class MicWatch(
         }
     }
 
-    private List<MicSession> Collect()
+    // One entry per process per endpoint: a process holding two microphones is listed twice.
+    private List<MicHolder> Collect()
     {
-        var found = new Dictionary<int, MicSession>();
+        var found = new Dictionary<(int Pid, string Endpoint), MicHolder>();
         var endpoints = source.Endpoints();
         try
         {
@@ -61,8 +62,9 @@ internal sealed class MicWatch(
             {
                 try
                 {
+                    var id = endpoint.Id;
                     foreach (var session in endpoint.ActiveSessions())
-                        if (!excludedPids.Contains(session.Pid)) found[session.Pid] = session;
+                        if (!excludedPids.Contains(session.Pid)) found[(session.Pid, id)] = new MicHolder(session.Pid, session.Name, id);
                 }
                 // A device that vanishes or refuses to enumerate must not hide the others.
                 catch (Exception error) when (error is not OutOfMemoryException) { }
@@ -72,12 +74,16 @@ internal sealed class MicWatch(
         {
             foreach (var endpoint in endpoints) endpoint.Dispose();
         }
-        return found.Values.OrderBy(app => app.Pid).ToList();
+        return found.Values.OrderBy(app => app.Pid).ThenBy(app => app.Endpoint, StringComparer.Ordinal).ToList();
     }
 
     private void Write(object line) => emit(JsonSerializer.Serialize(line, line.GetType(), JsonOptions));
 
-    private sealed record MicApp([property: JsonPropertyName("pid")] int Pid, [property: JsonPropertyName("name")] string Name);
+    private readonly record struct MicHolder(int Pid, string Name, string Endpoint);
+    private sealed record MicApp(
+        [property: JsonPropertyName("pid")] int Pid,
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("endpoint")] string Endpoint);
     private sealed record MicLine([property: JsonPropertyName("type")] string Type, [property: JsonPropertyName("apps")] List<MicApp> Apps);
     private sealed record ErrorLine([property: JsonPropertyName("type")] string Type, [property: JsonPropertyName("code")] string Code);
 }

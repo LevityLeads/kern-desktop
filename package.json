@@ -1,6 +1,6 @@
 {
   "name": "kern-desktop",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Electron desktop shell for Kern OS with Windows 11 Mica/Acrylic transparency",
   "main": "main.js",
   "author": {

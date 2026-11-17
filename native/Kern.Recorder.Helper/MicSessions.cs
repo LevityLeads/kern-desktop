@@ -10,6 +10,9 @@ internal readonly record struct MicSession(int Pid, string Name);
 
 internal interface IMicEndpoint : IDisposable
 {
+    // The endpoint ID (MMDevice.ID): the same string the recorder accepts as a microphone deviceId,
+    // so the desktop can record the microphone a call app is actually using.
+    string Id { get; }
     IReadOnlyList<MicSession> ActiveSessions();
 }
 
@@ -39,6 +42,8 @@ internal sealed class WasapiMicSessionSource : IMicSessionSource, IDisposable
 
 internal sealed class WasapiMicEndpoint(MMDevice device) : IMicEndpoint
 {
+    public string Id => device.ID;
+
     public IReadOnlyList<MicSession> ActiveSessions()
     {
         var manager = device.AudioSessionManager;

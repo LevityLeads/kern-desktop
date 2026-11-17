@@ -47,11 +47,11 @@ test('parses mic lines, ignores malformed ones and handles lines split across ch
   const { stdout } = spawns[0].child;
   stdout.emit('data', 'not json\n{"type":"mic","apps":[{"pid":1,"name":"Zoom"}]}\n{"type":"mic"');
   stdout.emit('data', ',"apps":[]}\n{"type":"error","code":"enumerate-failed"}\n{"type":"mic","apps":"x"}\n');
-  assert.deepEqual(snapshots, [[{ pid: 1, name: 'zoom' }], []]);
+  assert.deepEqual(snapshots, [[{ pid: 1, name: 'zoom', endpoint: null }], []]);
 });
 
 test('parseMicLine drops entries with a bad pid or name', () => {
-  assert.deepEqual(parseMicLine('{"type":"mic","apps":[{"pid":0,"name":"a"},{"pid":2,"name":""},{"pid":3,"name":5},{"pid":4,"name":"ok"}]}'), [{ pid: 4, name: 'ok' }]);
+  assert.deepEqual(parseMicLine('{"type":"mic","apps":[{"pid":0,"name":"a"},{"pid":2,"name":""},{"pid":3,"name":5},{"pid":4,"name":"ok"}]}'), [{ pid: 4, name: 'ok', endpoint: null }]);
   assert.equal(parseMicLine('[]'), null);
   assert.equal(parseMicLine('null'), null);
 });
@@ -146,4 +146,14 @@ test('status() records a spawn that throws', () => {
   });
   watcher.start();
   assert.deepEqual(watcher.status().lastStop, { at: '1970-01-01T00:00:00.000Z', why: 'spawn failed: ENOENT' });
+});
+
+test('parseMicLine keeps a usable endpoint id and drops an unusable one', () => {
+  const line = JSON.stringify({ type: 'mic', apps: [
+    { pid: 1, name: 'Chrome', endpoint: '{0.0.1.00000000}.{abc}' },
+    { pid: 2, name: 'zoom', endpoint: 'bad\u0001id' },
+    { pid: 3, name: 'teams', endpoint: 'x'.repeat(2000) },
+    { pid: 4, name: 'msedge', endpoint: 7 },
+  ] });
+  assert.deepEqual(parseMicLine(line).map((app) => app.endpoint), ['{0.0.1.00000000}.{abc}', null, null, null]);
 });

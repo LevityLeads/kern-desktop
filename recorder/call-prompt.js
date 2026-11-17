@@ -15,13 +15,15 @@ function displayName(app) {
 // mic it asks whether to record, on a card that floats above the call (prompt-card.js), never an
 // automatic start. Record starts through the same path as the recorder window's Start button, so
 // every consent and settings check applies. The card stays until it is answered, the call ends or
-// a recording starts some other way; "Not now" holds for the rest of that call. A recording
-// started from the card is stopped when the call ends; a manual one never is.
+// a recording starts some other way; "Not now" holds for the rest of that call. Record uses the
+// microphone the call app is using (the helper reports each holder's endpoint), so the recording
+// hears what the call hears; the saved choice applies only when that is ambiguous or unknown.
+// A recording started from the card is stopped when the call ends; a manual one never is.
 function createCallPrompt({ watcher, card, settings, supervisor, start, showRecorder, Notification,
   detector = new CallDetector(), now = Date.now, setTicker = setInterval, clearTicker = clearInterval, log = console }) {
   let apps = [];
   let ticker = null;
-  let pending = null;          // the open card's token, or null
+  let pending = null;          // the open card: { app, handle }, or null
   let promptSessionId = null;  // the recording this prompt started, the only one it may stop
   let last = null;             // the latest prompt decision, for diagnostics
 
@@ -46,20 +48,37 @@ function createCallPrompt({ watcher, card, settings, supervisor, start, showReco
 
   const withdraw = (outcome) => {
     if (!pending) return;
+    const { handle } = pending;
     pending = null;
-    card.close();
+    handle?.close();
     decide(outcome);
+  };
+
+  // The one microphone the call app holds right now, or null when it holds none or several.
+  const callMicrophone = (app) => {
+    const endpoints = new Set(apps.filter((holder) => holder.name === app && holder.endpoint).map((holder) => holder.endpoint));
+    return endpoints.size === 1 ? { mode: 'device', deviceId: [...endpoints][0] } : null;
   };
 
   async function onRecord(token) {
     if (pending !== token) return; // already answered, or the call already ended
     pending = null;
+    const microphone = callMicrophone(token.app);
     decide('record');
+    last = { ...last, microphone: microphone ? microphone.deviceId : 'saved choice' };
     // The one-time recording notice lives in the recorder window; never start before it is seen.
     if (!settings.get().noticeAcknowledged) { showRecorder(); return; }
     if (supervisor.isActive()) return;
     try {
-      const status = await start();
+      let status;
+      try { status = await start(microphone ? { microphone } : {}); }
+      catch (error) {
+        if (!microphone) throw error;
+        // The call's microphone would not open (unplugged in between, exclusive use): the saved choice still records.
+        log.error('Call prompt could not open the call microphone:', error?.message || error);
+        last = { ...last, microphone: `saved choice (call microphone failed: ${String(error?.message || error).slice(0, 80)})` };
+        status = await start({});
+      }
       promptSessionId = status?.sessionId || null;
     } catch (error) {
       log.error('Call prompt could not start recording:', error?.message || error);
@@ -78,11 +97,14 @@ function createCallPrompt({ watcher, card, settings, supervisor, start, showReco
     if (!settings.get().callPrompt) { noteLast(app, 'skipped: prompt turned off'); return; }
     if (supervisor.isActive()) { noteLast(app, 'skipped: already recording'); return; }
     if (pending) return;
-    const token = {};
+    const token = { app, handle: null };
     pending = token;
     noteLast(app, 'shown');
     try {
-      card.show({ app: displayName(app), onRecord: () => onRecord(token), onDismiss: () => onDismiss(token) });
+      token.handle = card.show({
+        title: 'Record this call?', body: `${displayName(app)} is using your microphone.`, primary: 'Record',
+        onPrimary: () => onRecord(token), onDismiss: () => onDismiss(token),
+      });
     } catch (error) {
       pending = null;
       log.error('Call prompt card failed:', error?.message || error);
@@ -123,8 +145,8 @@ function createCallPrompt({ watcher, card, settings, supervisor, start, showReco
       supervisor.off('ended', onEnded);
       clearTicker(ticker);
       ticker = null;
+      pending?.handle?.close();
       pending = null;
-      card.close();
     },
     // What the prompt saw and decided, for "Copy diagnostics". Process names only, never audio or titles.
     diagnostics() {
@@ -132,7 +154,7 @@ function createCallPrompt({ watcher, card, settings, supervisor, start, showReco
       const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
       return {
         enabled: settings.get().callPrompt !== false,
-        micHolders: apps.map((app) => app.name),
+        micHolders: apps.map((app) => (app.endpoint ? `${app.name} @ ${app.endpoint}` : app.name)),
         watcher: watcher.status?.() ?? null,
         detector: { ...call, heldSince: iso(call.heldSince), lastHeldAt: iso(call.lastHeldAt) },
         cardOpen: pending !== null,
