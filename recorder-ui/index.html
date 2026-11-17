@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:;" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kern recorder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <section id="banner" class="banner" role="alert" hidden>
+        <p id="banner-text"></p>
+        <div class="banner-actions">
+          <button id="banner-action" class="secondary" type="button"></button>
+          <button id="banner-dismiss" class="ghost" type="button" aria-label="Dismiss">Dismiss</button>
+        </div>
+      </section>
+
+      <section id="home">
+        <section class="card capture">
+          <div id="idle">
+            <button id="start" class="primary big" type="button" disabled>Start recording</button>
+            <p class="line">Mic: <span id="mic-name">Windows default</span> · <button id="mic-change" class="link" type="button">change</button></p>
+            <label id="mic-picker" class="picker" hidden>
+              <span class="label">Microphone</span>
+              <select id="mic-select"></select>
+            </label>
+            <p class="line quiet">Transcription <span id="transcription-state">on</span> · <button id="transcription-toggle" class="link" type="button">turn off</button></p>
+            <div id="notice" class="notice" hidden>
+              <p>Kern transcribes both sides of calls you record. Tell people you're recording.</p>
+              <button id="notice-ok" class="secondary" type="button">Got it, start recording</button>
+            </div>
+          </div>
+
+          <div id="recording" hidden>
+            <div class="rec-head">
+              <span id="rec-dot" class="dot" aria-hidden="true"></span>
+              <span id="timer" class="timer">00:00</span>
+              <span id="rec-state" class="label"></span>
+            </div>
+            <div class="levels">
+              <div class="level"><span class="label">You</span><div class="bar"><div id="level-me" class="fill"></div></div></div>
+              <div class="level"><span class="label">Them</span><div class="bar"><div id="level-them" class="fill"></div></div></div>
+            </div>
+            <p id="them-hint" class="quiet" hidden>Nothing from them yet.</p>
+            <p id="rec-warning" class="quiet" hidden></p>
+            <div class="rec-actions">
+              <button id="stop" class="primary big" type="button">Stop</button>
+              <button id="mute" class="secondary" type="button">Mute</button>
+              <button id="pause" class="secondary" type="button">Pause</button>
+            </div>
+            <section class="tail">
+              <h2 class="label">Live transcript · about a minute behind</h2>
+              <div id="tail" class="turns"></div>
+              <p id="tail-empty" class="quiet">The first lines show up here about a minute into the call.</p>
+            </section>
+          </div>
+        </section>
+
+        <section class="calls">
+          <h2 class="label">Recent calls</h2>
+          <ul id="calls" class="call-list"></ul>
+          <p id="calls-empty" class="quiet" hidden>No calls yet. Your first one shows up here.</p>
+        </section>
+      </section>
+
+      <section id="call" hidden>
+        <button id="back" class="link" type="button">All calls</button>
+        <input id="call-title" class="title-input" type="text" maxlength="120" aria-label="Call title" />
+        <p id="call-meta" class="quiet"></p>
+        <div id="call-progress" hidden>
+          <div class="bar"><div id="call-progress-fill" class="fill"></div></div>
+          <p id="call-progress-label" class="quiet"></p>
+        </div>
+        <p id="call-note" class="quiet" hidden></p>
+        <button id="call-summary" class="link" type="button" hidden>Open summary in Kern</button>
+        <div class="tools">
+          <button id="copy-text" class="secondary" type="button">Copy transcript</button>
+          <button id="copy-md" class="secondary" type="button">Copy as Markdown</button>
+          <input id="find" class="find" type="search" placeholder="Find" aria-label="Find in transcript" />
+          <span id="find-count" class="quiet"></span>
+        </div>
+        <div id="transcript" class="turns"></div>
+        <p id="transcript-empty" class="quiet" hidden></p>
+        <div class="call-footer">
+          <button id="copy-diagnostics" class="link" type="button">Copy diagnostics</button>
+          <button id="delete-call" class="link" type="button">Delete call</button>
+        </div>
+      </section>
+
+      <footer class="app-footer quiet"><span id="build"></span> · <button id="app-diagnostics" class="link" type="button">Copy diagnostics</button></footer>
+    </main>
+    <script src="format.js"></script>
+    <script src="banner.js"></script>
+    <script src="turns.js"></script>
+    <script src="home.js"></script>
+    <script src="calls-list.js"></script>
+    <script src="call-view.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

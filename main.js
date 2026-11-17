@@ -1,8 +1,26 @@
-const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain, powerMonitor, Notification } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  shell,
+  nativeImage,
+  ipcMain,
+  dialog,
+  globalShortcut,
+  powerMonitor,
+  powerSaveBlocker,
+  Notification,
+  clipboard,
+  net,
+  session,
+} = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { createDesktopRecorder } = require('./recorder/desktop-recorder');
+const { withRecordingDot } = require('./recorder/tray-icon');
 const {
   availableBrowsers,
   launchBrowser,
@@ -119,6 +137,50 @@ const store = new JsonStore({
 let mainWindow = null;
 let setupWindow = null;
 let tray = null;
+let recorder = null;
+let updater = null;
+let quitFinalising = false;
+let trayIcons = null;
+
+function recordingIsActive() {
+  return recorder ? recorder.isActive() : false;
+}
+
+function recordingsRoot() {
+  return path.join(app.getPath('documents'), 'Kern Recordings');
+}
+
+function bundledHelperPath() {
+  const executable = 'Kern.Recorder.Helper.exe';
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'recorder-helper', executable)
+    : path.join(__dirname, 'native', 'Kern.Recorder.Helper', 'publish', 'win-x64', executable);
+}
+
+function showRecorder() {
+  recorder?.show();
+}
+
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (kernUrl) createWindow();
+    else createSetupWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// Opens a Kern page (a call's summary thread) in the main Kern window. Only same-origin https
+// URLs are accepted; anything else is refused rather than opened.
+function openKernUrl(url) {
+  let target;
+  try { target = new URL(url); } catch { throw new Error('That summary link is invalid.'); }
+  if (!kernUrl || target.origin !== new URL(kernUrl).origin) throw new Error('That summary is not on your Kern site.');
+  focusMainWindow();
+  mainWindow?.loadURL(target.href);
+}
 
 /**
  * Resolve the Kern origin from env, then persisted settings.
@@ -205,13 +267,15 @@ if (!gotLock) {
     } else {
       createSetupWindow();
     }
+    setupRecorder();
     createTray();
-    setupAutoUpdater({
+    updater = setupAutoUpdater({
       autoUpdater,
       app,
       powerMonitor,
       Notification,
       getWindow: () => mainWindow,
+      isBusy: recordingIsActive,
     });
   });
 }
@@ -416,6 +480,9 @@ function createWindow() {
   // Inject CSS to make body translucent so Mica bleeds through
   // ------------------------------------
   mainWindow.webContents.on('did-finish-load', () => {
+    // A page load may follow a sign-in; calls waiting on one retry now.
+    recorder?.signInMayHaveChanged();
+
     // Inject transparency + drag region + titlebar inset variable.
     // Override the opaque dark theme backgrounds so the Windows 11
     // Acrylic material bleeds through. Each layer needs its own
@@ -550,20 +617,58 @@ function createWindow() {
 }
 
 // ------------------------------------------------------------------
+// Local recorder (recorder/desktop-recorder.js owns the wiring)
+// ------------------------------------------------------------------
+function setupRecorder() {
+  recorder = createDesktopRecorder({
+    electron: { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, session },
+    appRoot: __dirname,
+    recordingsRoot: recordingsRoot(),
+    userData: app.getPath('userData'),
+    helperPath: bundledHelperPath(),
+    getOrigin: () => kernUrl,
+    getMainWindow: () => mainWindow,
+    signIn: focusMainWindow,
+    openKernUrl,
+  });
+  recorder.on('state', () => updater?.busyChanged());
+  // Fires at most once a second (the tooltip clock); the menu and icon change only with state.
+  recorder.on('tray', ({ menuChanged, iconChanged, tooltip, recording }) => {
+    if (!tray) return;
+    tray.setToolTip(tooltip);
+    if (iconChanged && trayIcons) tray.setImage(recording ? trayIcons.recording : trayIcons.idle);
+    if (menuChanged) updateTrayMenu();
+  });
+
+  // Ctrl+Shift+R is the browser/Kern hard-refresh; use Ctrl+Alt+R so we never steal it.
+  const shortcutRegistered = globalShortcut.register('CommandOrControl+Alt+R', () => showRecorder());
+  if (!shortcutRegistered) console.error('Recorder shortcut Ctrl+Alt+R could not be registered.');
+}
+
+// ------------------------------------------------------------------
 // System tray
 // ------------------------------------------------------------------
-function createTray() {
-  const iconPath = path.join(__dirname, 'assets', 'icon.png');
-  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
-  tray = new Tray(icon);
+function recorderTrayTemplate() {
+  if (!recorder) return [];
+  return [
+    ...recorder.trayItems().map((item) => ({
+      label: item.label,
+      enabled: item.enabled !== false,
+      click: item.action ? () => recorder.runTrayAction(item.action) : undefined,
+    })),
+    { type: 'separator' },
+  ];
+}
 
-  const contextMenu = Menu.buildFromTemplate([
+// Rebuilt only when the recorder's menu actually changes (see recorder/tray-model.js).
+function updateTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    ...recorderTrayTemplate(),
     {
-      label: 'Show / Hide',
+      label: 'Show / Hide Kern',
       click: () => {
-        if (mainWindow) {
-          mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-        }
+        if (mainWindow) mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
       },
     },
     {
@@ -573,15 +678,22 @@ function createTray() {
     { type: 'separator' },
     {
       label: 'Quit',
-      click: () => {
-        app.isQuitting = true;
-        app.quit();
-      },
+      click: () => requestQuit(),
     },
-  ]);
+  ]));
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'assets', 'icon.png');
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+  const size = icon.getSize();
+  const recordingIcon = icon.isEmpty() ? icon
+    : nativeImage.createFromBitmap(withRecordingDot(icon.toBitmap(), size.width, size.height), size);
+  trayIcons = { idle: icon, recording: recordingIcon };
+  tray = new Tray(icon);
 
   tray.setToolTip('Kern');
-  tray.setContextMenu(contextMenu);
+  updateTrayMenu();
 
   tray.on('double-click', () => {
     if (mainWindow) {
@@ -591,14 +703,41 @@ function createTray() {
   });
 }
 
+async function requestQuit() {
+  if (quitFinalising) return;
+  if (recordingIsActive()) {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Stop recording and quit?',
+      message: 'Kern is still recording.',
+      detail: 'Quitting stops the recording. Everything recorded so far is saved and transcribed the next time Kern opens.',
+      buttons: ['Keep recording', 'Stop and quit'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (result.response !== 1) return;
+  }
+
+  quitFinalising = true;
+  try {
+    // Awaited: the stop and the call's final length are saved before the app exits.
+    await recorder?.shutdownForQuit();
+  } catch (error) {
+    console.error('Recorder shutdown failed:', error);
+  } finally {
+    app.isQuitting = true;
+    app.quit();
+  }
+}
+
 // ------------------------------------------------------------------
 // App lifecycle
 // ------------------------------------------------------------------
 app.on('window-all-closed', () => {
-  // On macOS, apps typically stay in the dock
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // The tray and recorder supervisor own the desktop lifetime on Windows.
+  if (process.platform === 'darwin') return;
+  if (!tray && !recordingIsActive()) app.quit();
 });
 
 app.on('activate', () => {
@@ -614,6 +753,16 @@ app.on('activate', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (recordingIsActive() && !quitFinalising) {
+    event.preventDefault();
+    requestQuit();
+    return;
+  }
   app.isQuitting = true;
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+  recorder?.destroy();
 });

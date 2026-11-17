@@ -1,0 +1,87 @@
+name: Windows capture spike
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-call-capture
+  pull_request:
+    paths:
+      - 'main.js'
+      - 'updater.js'
+      - 'browsers.js'
+      - 'edit-menu.js'
+      - 'preload.js'
+      - 'recorder/**'
+      - 'recorder-ui/**'
+      - 'native/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'electron-builder.yml'
+      - '.github/workflows/windows-capture-spike.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.314
+          cache: true
+          cache-dependency-path: native/**/packages.lock.json
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Restore pinned .NET dependencies
+        run: dotnet restore native/Kern.Recorder.sln --locked-mode
+
+      - name: Run Node tests
+        run: npm run test:node
+
+      - name: Run .NET tests
+        run: dotnet test native/Kern.Recorder.sln --configuration Release --no-restore
+
+      - name: Publish self-contained helper
+        run: npm run build:helper
+
+      # Stamp the build identity into package.json AFTER tests, BEFORE packaging. The version
+      # becomes <package version>-capture.<run>, which names the installer, shows in Windows Apps, and is
+      # what the recorder window, every status event and every recording manifest report.
+      # It sorts below the release it is based on and above earlier releases.
+      - name: Stamp build identity
+        shell: bash
+        run: |
+          base="$(node -p "require('./package.json').version")"
+          npm version "${base}-capture.${{ github.run_number }}" --no-git-tag-version
+          npm pkg set kernBuild.sha="${{ github.sha }}" kernBuild.run="${{ github.run_number }}" kernBuild.builtAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node -e "const b=require('./recorder/build-info').readBuildInfo();console.log('build label:',b.label)"
+
+      - name: Package unsigned Windows spike
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Upload spike artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kern-windows-capture-spike-${{ github.run_number }}
+          path: |
+            dist/*.exe
+            dist/*.yml
+          if-no-files-found: error
+          retention-days: 14

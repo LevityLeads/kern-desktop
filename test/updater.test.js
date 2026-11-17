@@ -3,7 +3,8 @@ const assert = require('node:assert');
 const { EventEmitter } = require('node:events');
 const { setupAutoUpdater, STARTUP_DELAY_MS, CHECK_INTERVAL_MS } = require('../updater');
 
-function harness({ visible = true, notifications = true } = {}) {
+function harness({ visible = true, notifications = true, busy = false } = {}) {
+  const state = { busy };
   const updater = new EventEmitter();
   updater.checks = 0;
   updater.installs = [];
@@ -32,13 +33,14 @@ function harness({ visible = true, notifications = true } = {}) {
     powerMonitor: power,
     Notification: FakeNotification,
     getWindow: () => win,
+    isBusy: () => state.busy,
     timers: {
       setTimeout: (fn, ms) => timeouts.push({ fn, ms }),
       setInterval: (fn, ms) => intervals.push({ fn, ms }),
     },
     log: { log() {}, error() {} },
   });
-  return { updater, win, shown, timeouts, intervals, app, power, api };
+  return { updater, win, shown, timeouts, intervals, app, power, api, state };
 }
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -105,4 +107,62 @@ test('a failed check is logged, not thrown', async () => {
   h.updater.checkForUpdates = () => Promise.reject(new Error('offline'));
   h.timeouts[0].fn();
   await tick();
+});
+
+test('pins the stable channel regardless of the installed version', () => {
+  const h = harness();
+  assert.strictEqual(h.updater.allowPrerelease, false);
+  assert.ok(!h.updater.channel);
+});
+
+test('does not install while recording, installs once when idle', () => {
+  const h = harness({ visible: false, busy: true });
+  h.updater.emit('update-downloaded', { version: '9.9.9' });
+  assert.strictEqual(h.updater.installs.length, 0);
+  assert.strictEqual(h.app.isQuitting, false);
+  h.api.busyChanged();
+  assert.strictEqual(h.updater.installs.length, 0);
+  h.state.busy = false;
+  h.api.busyChanged();
+  h.api.busyChanged();
+  assert.deepStrictEqual(h.updater.installs, [[true, true]]);
+});
+
+test('a click or hide while recording defers the install to idle', () => {
+  const h = harness({ visible: true, busy: true });
+  h.updater.emit('update-downloaded', { version: '9.9.9' });
+  h.shown[0].emit('click');
+  h.win.emit('hide');
+  assert.strictEqual(h.updater.installs.length, 0);
+  h.state.busy = false;
+  h.api.busyChanged();
+  assert.deepStrictEqual(h.updater.installs, [[true, true]], 'the click and hide asked for an install');
+});
+
+test('a hidden-window update waiting on a recording installs at idle', () => {
+  const h = harness({ visible: true, busy: true });
+  h.updater.emit('update-downloaded', { version: '9.9.9' });
+  h.win.visible = false;
+  h.state.busy = false;
+  h.api.busyChanged();
+  assert.strictEqual(h.updater.installs.length, 1);
+});
+
+test('does not download while recording and downloads at idle', async () => {
+  const h = harness({ busy: true });
+  let downloads = 0;
+  h.updater.downloadUpdate = async () => { downloads++; };
+  h.updater.emit('update-available', { version: '9.9.9' });
+  await tick();
+  assert.strictEqual(downloads, 0);
+  h.state.busy = false;
+  h.api.busyChanged();
+  await tick();
+  assert.strictEqual(downloads, 1);
+});
+
+test('a downloaded update never installs on app quit while recording', () => {
+  const h = harness({ busy: true });
+  h.updater.emit('update-downloaded', { version: '9.9.9' });
+  assert.strictEqual(h.updater.autoInstallOnAppQuit, false);
 });
