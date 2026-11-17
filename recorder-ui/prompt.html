@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:;" />
+    <title>Record this call?</title>
+    <link rel="stylesheet" href="prompt.css" />
+  </head>
+  <body>
+    <main class="prompt" role="alertdialog" aria-labelledby="prompt-title" aria-describedby="prompt-body">
+      <div class="prompt-head">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="brand">Kern</span>
+        <button id="prompt-close" class="close" type="button" aria-label="Not now">&times;</button>
+      </div>
+      <h1 id="prompt-title">Record this call?</h1>
+      <p id="prompt-body"><span id="prompt-app">A call app</span> is using your microphone.</p>
+      <div class="prompt-actions">
+        <button id="prompt-record" class="primary" type="button">Record</button>
+        <button id="prompt-dismiss" class="ghost" type="button">Not now</button>
+      </div>
+    </main>
+    <script src="prompt.js"></script>
+  </body>
+</html>

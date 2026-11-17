@@ -32,6 +32,11 @@ class CallDetector extends EventEmitter {
 
   get inCall() { return this.call !== null; }
 
+  // For diagnostics: the call in progress, or the app waiting out the start hold. Clock values as given to update().
+  status() {
+    return { inCall: this.inCall, app: this.call?.app ?? null, heldSince: this.heldSince, lastHeldAt: this.lastHeldAt };
+  }
+
   // apps: [{ pid, name }] currently holding the mic. nowMs: the clock for this snapshot.
   update(apps, nowMs) {
     const holder = this._holder(apps);

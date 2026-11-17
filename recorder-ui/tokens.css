@@ -1,0 +1,30 @@
+/* Kern signature, dark (warm-dark, one terracotta accent). Tokens from the house DESIGN.md.
+   Shared by the recorder window (styles.css) and the call prompt card (prompt.css). */
+:root {
+  color-scheme: dark;
+  --kern-canvas: #1c1c1c;
+  --kern-canvas-elevated: #252525;
+  --kern-canvas-inset: #161616;
+  --kern-ink: #f5f4ed;
+  --kern-ink-soft: rgba(245, 244, 237, 0.82);
+  --kern-ink-muted: rgba(245, 244, 237, 0.56);
+  --kern-ink-subtle: rgba(245, 244, 237, 0.40);
+  --kern-ink-hair: rgba(245, 244, 237, 0.08);
+  --kern-ink-whisper: rgba(245, 244, 237, 0.04);
+  --kern-border: rgba(245, 244, 237, 0.10);
+  --kern-accent: #d4512a;
+  --kern-accent-hover: #b8431f;
+  --kern-accent-soft: rgba(212, 81, 42, 0.12);
+  --kern-ease: cubic-bezier(0.5, 0, 0, 0.75);
+  --kern-duration: 0.33s;
+  --kern-duration-fast: 0.18s;
+  --kern-radius-sm: 4px;
+  --kern-radius-md: 8px;
+  --kern-radius-lg: 16px;
+  --kern-radius-pill: 9999px;
+  --kern-shadow-card: 0 0 0 1px rgba(245, 244, 237, 0.06), 0 4px 16px rgba(0, 0, 0, 0.40);
+  --kern-font-sans: 'Inter', 'InterVariable', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--kern-font-sans);
+  background: var(--kern-canvas);
+  color: var(--kern-ink);
+}

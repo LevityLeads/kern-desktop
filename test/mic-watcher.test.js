@@ -3,14 +3,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { BACKOFF_MAX_MS, BACKOFF_START_MS, MicWatcher, parseMicLine } = require('../recorder/mic-watcher');
+const { BACKOFF_MAX_MS, BACKOFF_START_MS, MicWatcher, parseErrorLine, parseMicLine } = require('../recorder/mic-watcher');
 
 class FakeChild extends EventEmitter {
   constructor() { super(); this.stdout = new EventEmitter(); this.killed = false; }
   kill() { this.killed = true; }
 }
 
-function rig() {
+function rig({ now = () => Date.UTC(2026, 10, 17, 19, 0, 0) } = {}) {
   const spawns = [];
   const timers = [];
   const quiet = { error() {} };
@@ -19,6 +19,7 @@ function rig() {
     spawnProcess: (file, args, options) => { const child = new FakeChild(); spawns.push({ file, args, options, child }); return child; },
     setTimer: (fn, ms) => { const timer = { fn, ms, cleared: false, unref() {} }; timers.push(timer); return timer; },
     clearTimer: (timer) => { if (timer) timer.cleared = true; },
+    now,
   });
   const snapshots = [];
   watcher.on('apps', (apps) => snapshots.push(apps));
@@ -107,4 +108,42 @@ test('stop() kills the child, cancels a pending restart and prevents any further
   spawns.at(-1).child.emit('exit', 0, null);
   assert.equal(timers.filter((t) => !t.cleared).length, 0);
   assert.equal(spawns.length, second);
+});
+
+test('parseErrorLine reads helper error codes only', () => {
+  assert.equal(parseErrorLine('{"type":"error","code":"enumerate-failed"}'), 'enumerate-failed');
+  assert.equal(parseErrorLine('{"type":"mic","apps":[]}'), null);
+  assert.equal(parseErrorLine('{"type":"error","code":5}'), null);
+  assert.equal(parseErrorLine('nope'), null);
+});
+
+test('status() reports launches, the last snapshot, helper errors and why the helper last stopped', () => {
+  const { watcher, spawns } = rig();
+  assert.deepEqual(watcher.status(), {
+    platform: 'win32', running: false, restartPending: false,
+    launches: 0, lastSnapshotAt: null, lastStop: null, lastHelperError: null,
+  });
+  watcher.start();
+  const { stdout } = spawns[0].child;
+  stdout.emit('data', '{"type":"error","code":"enumerate-failed"}\n{"type":"mic","apps":[{"pid":7,"name":"chrome"}]}\n');
+  let status = watcher.status();
+  assert.equal(status.running, true);
+  assert.equal(status.launches, 1);
+  assert.equal(status.lastSnapshotAt, '2026-11-17T19:00:00.000Z');
+  assert.deepEqual(status.lastHelperError, { at: '2026-11-17T19:00:00.000Z', code: 'enumerate-failed' });
+  spawns[0].child.emit('exit', 3, null);
+  status = watcher.status();
+  assert.equal(status.running, false);
+  assert.equal(status.restartPending, true);
+  assert.deepEqual(status.lastStop, { at: '2026-11-17T19:00:00.000Z', why: 'exit 3' });
+});
+
+test('status() records a spawn that throws', () => {
+  const watcher = new MicWatcher({
+    helperPath: 'missing.exe', platform: 'win32', log: { error() {} }, now: () => 0,
+    spawnProcess: () => { throw new Error('ENOENT'); },
+    setTimer: () => ({ unref() {} }), clearTimer: () => {},
+  });
+  watcher.start();
+  assert.deepEqual(watcher.status().lastStop, { at: '1970-01-01T00:00:00.000Z', why: 'spawn failed: ENOENT' });
 });

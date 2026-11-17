@@ -11,10 +11,11 @@ const { readJsonFile } = require('./safe-fs');
 // Summaries are cached per folder and only rebuilt when a file in it changes, so a list refresh
 // never re-parses every call's saved state.
 class CallService {
-  constructor({ root, pipeline, supervisor }) {
+  constructor({ root, pipeline, supervisor, callPrompt = null }) {
     this.root = root;
     this.pipeline = pipeline;
     this.supervisor = supervisor;
+    this.callPrompt = callPrompt;
     this.summaries = new Map();
   }
 
@@ -71,7 +72,7 @@ class CallService {
   // recorder status. No audio, no transcript content (this app keeps none).
   async diagnostics(sessionId) {
     const { levels, ...status } = this.supervisor.snapshot();
-    const report = { build: status.build, recorder: status };
+    const report = { build: status.build, recorder: status, callPrompt: this.callPromptDiagnostics() };
     if (sessionId) {
       const dir = await catalog.sessionDir(this.root, sessionId);
       const read = name => readJsonFile(dir, name, 1024 * 1024 * 16).catch(error => ({ unreadable: error.code || error.message }));
@@ -84,6 +85,11 @@ class CallService {
       report.pipelineError = this.pipeline.damage(sessionId);
     }
     return JSON.stringify(report, null, 2);
+  }
+
+  callPromptDiagnostics() {
+    if (!this.callPrompt) return null;
+    try { return this.callPrompt.diagnostics(); } catch (error) { return { unreadable: String(error?.message || error).slice(0, 200) }; }
   }
 
   // The Kern thread holding this call's summary, if Kern has posted one.

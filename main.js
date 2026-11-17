@@ -13,6 +13,7 @@ const {
   Notification,
   clipboard,
   net,
+  screen,
   session,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
@@ -625,7 +626,7 @@ function createWindow() {
 // ------------------------------------------------------------------
 function setupRecorder() {
   recorder = createDesktopRecorder({
-    electron: { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, session },
+    electron: { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, screen, session },
     appRoot: __dirname,
     recordingsRoot: recordingsRoot(),
     userData: app.getPath('userData'),

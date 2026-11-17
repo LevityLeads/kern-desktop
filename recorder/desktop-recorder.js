@@ -13,6 +13,7 @@ const { CaptureHealthAlerts, presentCaptureAlert } = require('./capture-health-a
 const { Connectivity } = require('./connectivity');
 const { MicWatcher } = require('./mic-watcher');
 const { createCallPrompt } = require('./call-prompt');
+const { PromptCard } = require('./prompt-card');
 const { IPC } = require('./protocol');
 const { isRecordingIcon, trayItems, traySignature, trayTooltip } = require('./tray-model');
 
@@ -35,7 +36,7 @@ function debounce(fn, ms) {
 // Events: 'state' (recorder state string changed), 'tray' { status, menuChanged, iconChanged, tooltip, recording }.
 function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, helperPath, getOrigin,
   getMainWindow, signIn, openKernUrl, log = console }) {
-  const { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, session } = electron;
+  const { BrowserWindow, ipcMain, dialog, clipboard, powerMonitor, powerSaveBlocker, Notification, net, screen, session } = electron;
   const events = new EventEmitter();
   const settings = new CallSettings(path.join(userData, 'call-settings.json'));
   const microphones = new MicrophonePreference(path.join(userData, 'recorder-settings.json'));
@@ -46,14 +47,17 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
     live: (id) => supervisor.liveCapture(id),
     defaultTranscribe: () => { const s = settings.get(); return s.enabled && s.noticeAcknowledged; },
   });
-  const service = new CallService({ root: recordingsRoot, pipeline, supervisor });
+  const card = new PromptCard({ BrowserWindow, ipcMain, screen, appRoot, log });
+  // Built before the controller so diagnostics can include it; it only calls the controller once
+  // callPrompt.start() below has run, by which time the controller exists.
+  const callPrompt = createCallPrompt({
+    watcher: new MicWatcher({ helperPath, log }), card, settings, supervisor, Notification, log,
+    start: () => controller.start(), showRecorder: () => controller.show(),
+  });
+  const service = new CallService({ root: recordingsRoot, pipeline, supervisor, callPrompt });
   const controller = new RecorderController({
     BrowserWindow, ipcMain, dialog, clipboard, appRoot, getParentWindow: getMainWindow,
     supervisor, pipeline, service, settings, microphones, signIn, openKernUrl,
-  });
-  const callPrompt = createCallPrompt({
-    watcher: new MicWatcher({ helperPath, log }), settings, supervisor, Notification, log,
-    start: () => controller.start(), showRecorder: () => controller.show(),
   });
   const alerts = new CaptureHealthAlerts();
   const connectivity = new Connectivity({ isOnline: () => net.isOnline() });
@@ -131,6 +135,7 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
     },
     destroy() {
       callPrompt.stop();
+      card.dispose();
       connectivity.stop();
       session.defaultSession?.cookies?.off?.('changed', signInChanged);
       controller.destroy();
