@@ -1,11 +1,10 @@
 'use strict';
 
-const { buildConversation } = require('./transcript-model');
 const { windowCount } = require('./window-cutter');
-const { legacyTranscript } = require('./transcript-window');
 
 // Pure: turns stored state into exactly what the recorder window shows. The renderer does no
-// interpretation of its own; every label and sentence here is final copy.
+// interpretation of its own; every label and sentence here is final copy. It carries status only:
+// the transcript and summary are read in Kern, so no transcript text ever reaches the window.
 
 function durationMs({ state, session, live }) {
   if (live) return live.elapsedMs;
@@ -27,8 +26,7 @@ function chip({ kind, state, damage, live }) {
   }
   switch (state.stage) {
     case 'complete': return { kind: 'ready', label: 'Ready' };
-    case 'transcribing': return { kind: 'working', label: `Transcribing ${state.cloud.transcribedWindows ?? 0}/${expectedWindows(state)}` };
-    case 'publishing': case 'recording': return { kind: 'working', label: 'Finishing' };
+    case 'transcribing': case 'publishing': case 'recording': return { kind: 'working', label: 'Processing' };
     case 'sign-in-required': return { kind: 'attention', label: 'Needs sign-in' };
     case 'failed': return { kind: 'failed', label: 'Failed' };
     case 'empty': return { kind: 'local', label: 'No audio' };
@@ -92,10 +90,9 @@ function callSummary(input) {
   };
 }
 
-// For the call view. `tail` is the live transcript so far while the call is still in progress.
+// For the call view: Recording, Processing or Ready, and whether Kern has a thread to open.
 function callView(input) {
-  const { kind, state, legacy, tail, live } = input;
-  const windows = kind === 'v1' ? legacyTranscript(legacy?.transcript) : state?.transcript?.windows || tail;
+  const { kind, state, live } = input;
   return {
     ...callSummary(input),
     legacy: kind === 'v1',
@@ -103,8 +100,6 @@ function callView(input) {
     progress: progress(state, live),
     banner: kind === 'v1' ? null : banner(input),
     note: kind === 'v1' ? null : note(state),
-    items: windows ? buildConversation(windows) : [],
-    partial: kind !== 'v1' && !state?.transcript,
     hasSummary: Boolean(state?.cloud?.kernThreadUrl),
     canRename: kind !== 'v1' && Boolean(state),
     canDelete: !live,

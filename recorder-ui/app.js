@@ -73,7 +73,7 @@
     await callView.open(sessionId);
   }
 
-  // The call being recorded: its transcript tail and whether it needs the user (sign-in).
+  // The call being recorded: whether it needs the user (sign-in).
   async function refreshLive() {
     const status = home.status();
     const id = ['starting', 'recording', 'paused', 'stopping'].includes(status.state) ? status.sessionId : null;
@@ -83,7 +83,6 @@
       const view = await api.getCall(id);
       if (liveId !== id) return;
       liveBanner = view.banner;
-      home.renderTail(view.items);
     } catch { liveBanner = null; }
     renderBanner();
   }
@@ -96,7 +95,7 @@
     lastSessionId = status.sessionId;
     calls.refresh();
     refreshLive();
-    // After Stop, show the call finishing and its transcript arriving.
+    // After Stop, show the call's status: Processing, then Ready.
     if (ended && status.sessionId) openCall(status.sessionId);
   });
   api.onCallsChanged(() => {

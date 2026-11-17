@@ -3,15 +3,14 @@
 const { EventEmitter } = require('node:events');
 const catalog = require('./session-catalog');
 const { CallStore, fresh } = require('./call-store');
-const { runCall, settleEnd } = require('./call-runner');
-const { fetchTranscript } = require('./call-cloud');
+const { runCall, settleEnd, summaryPending } = require('./call-runner');
 const { caller } = require('./call-publisher');
 const { MAX_DELAY_MS, backoffDelay, classify, errorRecord } = require('./retry-policy');
 
 // Runs every call independently: one timer and one lock per call, no shared queue, so a slow
 // upload or a failing call never holds up another. Emits 'change' {sessionId} after every saved
-// step and 'complete' {sessionId} when a transcript lands during this run of the app.
-const TAIL_INTERVAL_MS = 15000;
+// step, 'complete' {sessionId} when Kern finishes a call during this run of the app, and
+// 'summary' {sessionId} once, when the call's Kern thread first exists.
 const AUTH_LIVE_RETRY_MS = 60000;
 const RESET_REMOTE = new Set(['remote-deleted', 'not-found']);
 // Deleting a call locally may go ahead without Kern's copy only when that copy is already gone
@@ -37,8 +36,6 @@ class CallPipeline extends EventEmitter {
     this.queued = new Set();
     this.waiting = new Set();
     this.damaged = new Map();
-    this.tails = new Map();
-    this.tailAt = new Map();
     this.abort = new AbortController();
     this.closed = false;
   }
@@ -50,6 +47,7 @@ class CallPipeline extends EventEmitter {
       audioFile: () => catalog.audioPath(this.root, sessionId),
       save: state => this.save(state),
       onComplete: state => this.emit('complete', { sessionId: state.sessionId }),
+      onSummary: state => this.emit('summary', { sessionId: state.sessionId }),
     };
   }
 
@@ -97,7 +95,6 @@ class CallPipeline extends EventEmitter {
         await this.save(state);
       }
       if (next !== null) this.schedule(sessionId, next);
-      await this.refreshTail(state);
     } catch (error) {
       await this.failed(sessionId, state, error).catch(() => {});
     }
@@ -133,19 +130,6 @@ class CallPipeline extends EventEmitter {
     await this.save(state);
   }
 
-  // A best-effort look at what Kern has transcribed so far, for the "about a minute behind" tail.
-  async refreshTail(state) {
-    const id = state.sessionId;
-    if (!['recording', 'transcribing'].includes(state.stage) || !state.remoteId || !state.windows.some(w => w.uploaded)) return;
-    if (this.now() - (this.tailAt.get(id) || 0) < TAIL_INTERVAL_MS) return;
-    this.tailAt.set(id, this.now());
-    try {
-      this.tails.set(id, await fetchTranscript(this.context(id), state));
-      this.emit('change', { sessionId: id });
-    } catch { /* the tail is a nicety; the final transcript is fetched separately */ }
-  }
-
-  tail(sessionId) { return this.tails.get(sessionId) || null; }
   damage(sessionId) { return this.damaged.get(sessionId) || null; }
 
   // App launch: every capture-v2 call that is not finished resumes; interrupted captures are
@@ -159,7 +143,8 @@ class CallPipeline extends EventEmitter {
           state = fresh(id, { transcribe: this.defaultTranscribe() });
           await this.save(state);
         }
-        if (state.stage === 'failed' || (state.stage === 'complete' && state.audioDeleted)) return;
+        // A finished call still waiting for its summary thread keeps polling after a restart.
+        if (state.stage === 'failed' || (state.stage === 'complete' && state.audioDeleted && !summaryPending(state, this.now()))) return;
         this.schedule(id, 0);
       }).catch((error) => this.failed(id, null, error));
     }
@@ -235,7 +220,7 @@ class CallPipeline extends EventEmitter {
       }
       this.clearTimer(this.timers.get(sessionId));
       this.timers.delete(sessionId);
-      for (const map of [this.tails, this.tailAt, this.damaged]) map.delete(sessionId);
+      this.damaged.delete(sessionId);
       this.waiting.delete(sessionId);
       await catalog.removeSession(this.root, sessionId);
     });
@@ -256,4 +241,4 @@ class CallPipeline extends EventEmitter {
   }
 }
 
-module.exports = { CallPipeline, TAIL_INTERVAL_MS };
+module.exports = { CallPipeline };

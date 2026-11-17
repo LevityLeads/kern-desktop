@@ -16,6 +16,7 @@ function harness(t, { kern = fakeKern(), root = tempRoot(t) } = {}) {
   let capture = null;
   let clock = 1_000_000;
   const completed = [];
+  const summaries = [];
   const http = new CallHttp({ getSession: () => kern.session, getOrigin: () => ORIGIN, fetchImpl: kern.upload });
   const pipeline = new CallPipeline({
     root, http, defaultTranscribe: () => true, now: () => clock,
@@ -23,8 +24,9 @@ function harness(t, { kern = fakeKern(), root = tempRoot(t) } = {}) {
     setTimer: (fn, ms) => ({ fn, ms }), clearTimer: () => {},
   });
   pipeline.on('complete', ({ sessionId }) => completed.push(sessionId));
+  pipeline.on('summary', ({ sessionId }) => summaries.push(sessionId));
   return {
-    root, kern, pipeline, completed,
+    root, kern, pipeline, completed, summaries,
     capture(sessionId, committedFrames) { capture = sessionId ? { sessionId, committedFrames } : null; },
     advance(ms) { clock += ms; },
     delay: (id) => pipeline.timers.get(id)?.ms ?? null,
@@ -39,15 +41,7 @@ function harness(t, { kern = fakeKern(), root = tempRoot(t) } = {}) {
   };
 }
 
-function transcriptFor(count) {
-  return Array.from({ length: count }, (_, index) => ({
-    window_index: index,
-    transcript: { adapter: 'groq-whisper-v2', silent: false, text: `Me: hello ${index}`, error: null,
-      utterances: [{ speaker: index % 2 ? 'them' : 'me', startMs: index * 60000 + 100, endMs: index * 60000 + 900, text: `line ${index}` }] },
-  }));
-}
-
-test('live call: windows publish during the call, the rest after stop, then transcript lands and audio is deleted', async (t) => {
+test('live call: windows publish during the call, the rest after stop, then Kern finishes, the transcript is NOT downloaded and audio is deleted', async (t) => {
   const h = harness(t);
   writeSession(h.root, { state: 'recording', frames: 130000 * 16 });
   h.capture(SESSION, 130000 * 16);
@@ -73,15 +67,18 @@ test('live call: windows publish during the call, the rest after stop, then tran
   assert.equal(h.state().stage, 'transcribing');
 
   h.kern.state = 'complete';
-  h.kern.transcripts = transcriptFor(3);
   await h.fire();
   const done = h.state();
   assert.equal(done.stage, 'complete');
-  assert.equal(done.transcript.windows.length, 3);
+  assert.equal(done.transcript, undefined);
+  assert.equal(h.kern.calls.some(c => c.includes('/transcript')), false, 'completion makes no transcript request');
   assert.equal(done.audioDeleted, true);
   assert.equal(fs.existsSync(path.join(h.root, SESSION, 'audio.pcm')), false);
   assert.equal(fs.existsSync(path.join(h.root, SESSION, 'session.json')), true);
   assert.deepEqual(h.completed, [SESSION]);
+  // No summary thread yet: nothing is announced, and the pipeline keeps looking.
+  assert.deepEqual(h.summaries, []);
+  assert.equal(h.delay(SESSION), 60000);
 });
 
 test('restart mid-call resumes where it stopped: no window is sent twice', async (t) => {
@@ -272,4 +269,79 @@ test('a refused seal resends every window once, then finalizes instead of strand
   await h.fire();
   assert.equal(h.kern.finalized.durationMs, 70000);
   assert.equal(h.state().stage, 'transcribing');
+});
+
+async function finishedCall(t, { url = null } = {}) {
+  const h = harness(t);
+  writeSession(h.root, { state: 'stopped', frames: 30000 * 16 });
+  await h.pipeline.onEnded({ sessionId: SESSION, context: { transcribe: true } });
+  await h.fire();
+  h.kern.state = 'complete';
+  h.kern.kernThreadUrl = url;
+  await h.fire();
+  return h;
+}
+const THREAD = `${ORIGIN}/threads/abc`;
+
+test('the summary notification fires once, when the Kern thread first exists, and not again after a restart', async (t) => {
+  const h = await finishedCall(t);
+  assert.equal(h.state().stage, 'complete');
+  assert.deepEqual(h.summaries, []);
+  h.advance(60000);
+  await h.fire();
+  assert.deepEqual(h.summaries, []);
+  h.kern.kernThreadUrl = THREAD;
+  h.advance(60000);
+  await h.fire();
+  assert.deepEqual(h.summaries, [SESSION]);
+  assert.equal(h.state().cloud.kernThreadUrl, THREAD);
+  assert.ok(h.state().summaryNotifiedAt);
+  assert.equal(h.delay(SESSION), null, 'polling stops once notified');
+
+  const restarted = harness(t, { kern: h.kern, root: h.root });
+  await restarted.pipeline.start();
+  assert.equal(restarted.delay(SESSION), null, 'nothing is scheduled for a notified call');
+  await restarted.pipeline.run(SESSION);
+  assert.deepEqual(restarted.summaries, []);
+});
+
+test('a thread that already exists when Kern finishes is announced once, at completion', async (t) => {
+  const h = await finishedCall(t, { url: THREAD });
+  assert.deepEqual(h.summaries, [SESSION]);
+  await h.pipeline.run(SESSION);
+  assert.deepEqual(h.summaries, [SESSION]);
+});
+
+test('a restart before the summary exists keeps waiting, then announces once', async (t) => {
+  const h = await finishedCall(t);
+  const restarted = harness(t, { kern: h.kern, root: h.root });
+  await restarted.pipeline.start();
+  assert.equal(restarted.delay(SESSION), 0, 'the pending summary resumes polling');
+  h.kern.kernThreadUrl = THREAD;
+  await restarted.fire();
+  assert.deepEqual(restarted.summaries, [SESSION]);
+});
+
+test('the summary is awaited for 4 hours, not longer', async (t) => {
+  const h = await finishedCall(t);
+  h.advance(4 * 60 * 60000 - 60000 - 1);
+  await h.fire();
+  assert.equal(h.delay(SESSION), 60000, 'still polling just inside 4 h');
+  h.advance(60002);
+  h.kern.kernThreadUrl = THREAD;
+  await h.fire();
+  assert.deepEqual(h.summaries, [], 'gave up after 4 h');
+});
+
+test('call.json from an older version loads: no summaryNotifiedAt, and its stored transcript is dropped on the next save', async (t) => {
+  const h = await finishedCall(t);
+  const old = h.state();
+  delete old.summaryNotifiedAt;
+  old.transcript = { windows: [{ index: 0, text: 'secret words', utterances: null, segments: null, error: null, silent: false }] };
+  fs.writeFileSync(path.join(h.root, SESSION, 'call.json'), JSON.stringify(old));
+  const loaded = await h.pipeline.store.load(SESSION);
+  assert.equal(loaded.summaryNotifiedAt, null);
+  assert.equal(loaded.transcript, undefined);
+  await h.pipeline.store.save(loaded);
+  assert.doesNotMatch(fs.readFileSync(path.join(h.root, SESSION, 'call.json'), 'utf8'), /secret words/);
 });

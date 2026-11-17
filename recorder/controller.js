@@ -43,10 +43,6 @@ class RecorderController {
       [IPC.RENAME_CALL]: ({ sessionId, title }) => pipeline.rename(sessionId, title).then(() => ({ ok: true })),
       [IPC.RETRY_CALL]: ({ sessionId }) => pipeline.retry(sessionId).then(() => ({ ok: true })),
       [IPC.DELETE_CALL]: ({ sessionId }) => this.confirmDelete(sessionId),
-      [IPC.COPY_TRANSCRIPT]: async ({ sessionId, format }) => {
-        clipboard.writeText(await service.transcriptText(sessionId, format));
-        return { ok: true };
-      },
       [IPC.COPY_DIAGNOSTICS]: async ({ sessionId }) => {
         clipboard.writeText(await service.diagnostics(sessionId));
         return { ok: true };
@@ -76,7 +72,7 @@ class RecorderController {
     const choice = await this.dialog.showMessageBox(this.parentForDialog(), {
       type: 'warning', buttons: ['Cancel', 'Delete call'], defaultId: 0, cancelId: 0, noLink: true,
       title: 'Delete call', message: 'Delete this call?',
-      detail: 'The transcript and any audio on this PC are deleted, and the call is removed from Kern. This cannot be undone.',
+      detail: 'Any audio on this PC is deleted, and the call is removed from Kern. This cannot be undone.',
     });
     if (choice.response !== 1) return { deleted: false };
     await this.pipeline.remove(sessionId);
@@ -107,7 +103,7 @@ class RecorderController {
     return this.window;
   }
 
-  // Brings the recorder forward on one call (a "Transcript ready" notification was clicked).
+  // Brings the recorder forward on one call.
   openCall(sessionId) {
     const loading = !this.window || this.window.isDestroyed() || this.window.webContents.isLoading();
     if (loading) this.pendingOpen = sessionId;

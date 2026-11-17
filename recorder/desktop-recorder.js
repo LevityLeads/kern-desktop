@@ -83,11 +83,14 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
   });
 
   pipeline.on('change', callsChanged);
-  pipeline.on('complete', ({ sessionId }) => {
+  // One notification per call, when its summary thread exists in Kern. Clicking opens that thread.
+  pipeline.on('summary', ({ sessionId }) => {
     try {
       if (!Notification.isSupported()) return;
-      const notification = new Notification({ title: 'Transcript ready', body: 'Your call has been transcribed. Click to open it.' });
-      notification.on('click', () => controller.openCall(sessionId));
+      const notification = new Notification({ title: 'Call summary ready', body: 'Click to open it in Kern.' });
+      notification.on('click', () => {
+        service.summaryUrl(sessionId).then(({ url }) => openKernUrl(url)).catch(report('open summary'));
+      });
       notification.show();
     } catch (error) { report('notification')(error); }
   });

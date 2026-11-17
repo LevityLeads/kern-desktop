@@ -4,7 +4,6 @@ const { writeJsonWithRetry } = require('./atomic-json');
 const { isPlainObject } = require('./protocol');
 const { CallError, safePath, readJsonFile } = require('./safe-fs');
 const { FILES, sessionDir } = require('./session-catalog');
-const { normalizeWindowTranscript } = require('./transcript-window');
 
 // call.json: the desktop's durable record of one call's processing. Written atomically after
 // every step, validated on every load, so a crash at any point resumes exactly where it stopped.
@@ -13,7 +12,7 @@ const { normalizeWindowTranscript } = require('./transcript-window');
 //        local      transcription was off for this call
 //        publishing uploading the remaining windows after the call ended
 //        transcribing  finalized; waiting for Kern
-//        complete   transcript stored locally (audio deleted)
+//        complete   Kern has the transcript (audio deleted); the summary is read in Kern
 //        empty      the call ended with no audio
 //        sign-in-required | failed
 const STAGES = new Set(['recording', 'local', 'publishing', 'transcribing', 'complete', 'empty', 'sign-in-required', 'failed']);
@@ -29,7 +28,7 @@ function fresh(sessionId, { transcribe = false } = {}) {
     finalFrames: null, truncated: false, endReason: null,
     windows: [], finalized: false,
     cloud: { state: null, windowCount: null, transcribedWindows: null, kernThreadUrl: null },
-    cloudFailed: false, transcript: null, audioDeleted: false,
+    cloudFailed: false, summaryNotifiedAt: null, audioDeleted: false,
     stage: transcribe ? 'recording' : 'local', error: null, attempts: 0, nextAttemptAt: 0, completedAt: null,
   };
 }
@@ -55,20 +54,22 @@ function validError(error) {
 }
 
 function validate(value, sessionId) {
+  // call.json files written before summaryNotifiedAt existed, and any transcript an older version
+  // stored: the transcript is never kept or shown here any more, the next save drops it.
+  if (isPlainObject(value)) {
+    if (value.summaryNotifiedAt === undefined) value.summaryNotifiedAt = null;
+    delete value.transcript;
+  }
   const ok = isPlainObject(value) && value.version === 2 && value.sessionId === sessionId &&
     nullable(value.title, str(120)) && typeof value.transcribe === 'boolean' &&
     nullable(value.origin, str(256)) && nullable(value.ownerId, str(128)) && nullable(value.storageOrigin, str(256)) &&
     nullable(value.remoteId, v => UUID.test(v)) && nullable(value.finalFrames, int) &&
     typeof value.truncated === 'boolean' && nullable(value.endReason, v => v === 'stopped' || v === 'interrupted') &&
     Array.isArray(value.windows) && value.windows.length <= 240 && value.windows.every(validWindow) &&
-    typeof value.finalized === 'boolean' && validCloud(value.cloud) && typeof value.cloudFailed === 'boolean' &&
+    typeof value.finalized === 'boolean' && validCloud(value.cloud) && typeof value.cloudFailed === 'boolean' && nullable(value.summaryNotifiedAt, str(64)) &&
     typeof value.audioDeleted === 'boolean' && STAGES.has(value.stage) && validError(value.error) &&
-    int(value.attempts) && Number.isFinite(value.nextAttemptAt) && nullable(value.completedAt, str(64)) &&
-    (value.transcript === null || (isPlainObject(value.transcript) && Array.isArray(value.transcript.windows)));
+    int(value.attempts) && Number.isFinite(value.nextAttemptAt) && nullable(value.completedAt, str(64));
   if (!ok) throw new CallError('invalid-state', 'This call\'s saved progress is damaged.');
-  if (value.transcript) {
-    value.transcript = { windows: value.transcript.windows.map(w => normalizeWindowTranscript(w, w?.index)) };
-  }
   return value;
 }
 

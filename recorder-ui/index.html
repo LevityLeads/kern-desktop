@@ -52,11 +52,6 @@
               <button id="mute" class="secondary" type="button">Mute</button>
               <button id="pause" class="secondary" type="button">Pause</button>
             </div>
-            <section class="tail">
-              <h2 class="label">Live transcript · about a minute behind</h2>
-              <div id="tail" class="turns"></div>
-              <p id="tail-empty" class="quiet">The first lines show up here about a minute into the call.</p>
-            </section>
           </div>
         </section>
 
@@ -76,15 +71,7 @@
           <p id="call-progress-label" class="quiet"></p>
         </div>
         <p id="call-note" class="quiet" hidden></p>
-        <button id="call-summary" class="link" type="button" hidden>Open summary in Kern</button>
-        <div class="tools">
-          <button id="copy-text" class="secondary" type="button">Copy transcript</button>
-          <button id="copy-md" class="secondary" type="button">Copy as Markdown</button>
-          <input id="find" class="find" type="search" placeholder="Find" aria-label="Find in transcript" />
-          <span id="find-count" class="quiet"></span>
-        </div>
-        <div id="transcript" class="turns"></div>
-        <p id="transcript-empty" class="quiet" hidden></p>
+        <button id="call-summary" class="primary" type="button" hidden>Open in Kern</button>
         <div class="call-footer">
           <button id="copy-diagnostics" class="link" type="button">Copy diagnostics</button>
           <button id="delete-call" class="link" type="button">Delete call</button>
@@ -95,7 +82,6 @@
     </main>
     <script src="format.js"></script>
     <script src="banner.js"></script>
-    <script src="turns.js"></script>
     <script src="home.js"></script>
     <script src="calls-list.js"></script>
     <script src="call-view.js"></script>

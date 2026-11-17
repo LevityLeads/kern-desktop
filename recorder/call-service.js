@@ -5,12 +5,11 @@ const path = require('node:path');
 const catalog = require('./session-catalog');
 const { isActiveState } = require('./protocol');
 const { callSummary, callView } = require('./call-view-model');
-const { toMarkdown, toPlainText } = require('./transcript-model');
 const { readJsonFile } = require('./safe-fs');
 
-// Read side of the recorder window: the calls list, one call's view, copy and diagnostics.
+// Read side of the recorder window: the calls list, one call's status, diagnostics and the link to Kern.
 // Summaries are cached per folder and only rebuilt when a file in it changes, so a list refresh
-// never re-parses every stored transcript.
+// never re-parses every call's saved state.
 class CallService {
   constructor({ root, pipeline, supervisor }) {
     this.root = root;
@@ -40,7 +39,7 @@ class CallService {
     let damage = this.pipeline.damage(sessionId);
     try { state = await this.pipeline.store.load(sessionId); }
     catch (error) { damage ||= { code: 'invalid-state', message: error.message, retry: false }; }
-    return { sessionId, kind, session, state, damage, tail: this.pipeline.tail(sessionId), live: this.liveFor(sessionId) };
+    return { sessionId, kind, session, state, damage, live: this.liveFor(sessionId) };
   }
 
   async summary(sessionId) {
@@ -68,23 +67,8 @@ class CallService {
     return callView(input);
   }
 
-  heading(view) {
-    const date = view.startedAtUtc ? new Date(view.startedAtUtc).toLocaleString() : 'Call';
-    const minutes = Math.max(1, Math.round(view.durationMs / 60000));
-    return { title: view.title || date, subtitle: `${view.title ? `${date} · ` : ''}${minutes} min` };
-  }
-
-  async transcriptText(sessionId, format) {
-    const view = await this.get(sessionId);
-    if (!view.items.length) throw new Error('There is no transcript to copy yet.');
-    const { title, subtitle } = this.heading(view);
-    return format === 'markdown'
-      ? toMarkdown(view.items, { title, subtitle })
-      : toPlainText(view.items, { heading: `${title}\n${subtitle}` });
-  }
-
-  // Support bundle: the helper's session.json and this app's call.json (transcript text left
-  // out), plus the build and recorder status. No audio, no transcript content.
+  // Support bundle: the helper's session.json and this app's call.json, plus the build and
+  // recorder status. No audio, no transcript content (this app keeps none).
   async diagnostics(sessionId) {
     const { levels, ...status } = this.supervisor.snapshot();
     const report = { build: status.build, recorder: status };
@@ -92,7 +76,8 @@ class CallService {
       const dir = await catalog.sessionDir(this.root, sessionId);
       const read = name => readJsonFile(dir, name, 1024 * 1024 * 16).catch(error => ({ unreadable: error.code || error.message }));
       const call = await read(catalog.FILES.CALL);
-      if (call?.transcript?.windows) call.transcript = { windows: call.transcript.windows.length };
+      // call.json written by an older version may still hold the transcript; never put it in a bundle.
+      if (call && typeof call === 'object') delete call.transcript;
       report.session = await read(catalog.FILES.SESSION);
       report.call = call;
       report.audioFrames = await catalog.audioFrames(this.root, sessionId).catch(() => null);
