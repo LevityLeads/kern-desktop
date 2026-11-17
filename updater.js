@@ -12,9 +12,21 @@
 //     time the window is hidden, the notification is clicked, or the
 //     app quits
 //
+// Nothing downloads-and-installs while a capture is active (isBusy):
+// downloads wait, the install waits, and the app never installs on
+// quit mid-recording. The caller calls busyChanged() when the
+// recorder state changes and the deferred work resumes at idle.
+//
+// The channel is pinned to stable. electron-updater defaults
+// allowPrerelease to true for a prerelease current version (a
+// 1.1.0-capture.N spike), which then only accepts tags in the
+// "capture" channel and never sees a plain release.
+//
 // Electron objects are injected so the policy is testable with plain
 // node (see test/updater.test.js).
 // ------------------------------------------------------------------
+
+const { UpdateGuard } = require('./recorder/update-guard');
 
 const STARTUP_DELAY_MS = 10 * 1000;
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -26,6 +38,7 @@ const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
  * @param {object} deps.powerMonitor  electron powerMonitor
  * @param {Function} deps.Notification electron Notification class
  * @param {Function} deps.getWindow   returns the main BrowserWindow or null
+ * @param {Function} [deps.isBusy]    true while a capture is active; defers download and install
  * @param {object} [deps.timers]      { setTimeout, setInterval } for tests
  * @param {object} [deps.log]         console-like logger
  */
@@ -36,15 +49,20 @@ function setupAutoUpdater(deps) {
     powerMonitor,
     Notification,
     getWindow,
+    isBusy = () => false,
     timers = { setTimeout, setInterval },
     log = console,
   } = deps;
 
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+  // The guard owns download and install-on-quit while a capture is active.
+  const guard = new UpdateGuard(autoUpdater, isBusy);
+  guard.configure();
+  autoUpdater.autoInstallOnAppQuit = !isBusy();
 
   let readyVersion = null;
   let installing = false;
+  let wantInstall = false;
   let notified = false;
 
   function check() {
@@ -57,7 +75,12 @@ function setupAutoUpdater(deps) {
 
   function install() {
     if (installing) return;
+    if (isBusy()) {
+      wantInstall = true;
+      return;
+    }
     installing = true;
+    wantInstall = false;
     app.isQuitting = true;
     try {
       // isSilent: no NSIS wizard. isForceRunAfter: reopen Kern afterwards.
@@ -96,6 +119,12 @@ function setupAutoUpdater(deps) {
     }
   }
 
+  function busyChanged() {
+    guard.captureStateChanged();
+    if (isBusy() || !readyVersion || installing) return;
+    if (wantInstall || !isWindowVisible()) install();
+  }
+
   autoUpdater.on('update-available', (info) => log.log('Update available:', info && info.version));
   autoUpdater.on('update-downloaded', (info) => onReady(info && info.version));
   autoUpdater.on('error', (err) => log.error('Auto-updater error:', err));
@@ -104,7 +133,7 @@ function setupAutoUpdater(deps) {
   timers.setInterval(check, CHECK_INTERVAL_MS);
   if (powerMonitor) powerMonitor.on('resume', check);
 
-  return { check, install, get readyVersion() { return readyVersion; } };
+  return { check, install, busyChanged, get readyVersion() { return readyVersion; } };
 }
 
 module.exports = { setupAutoUpdater, STARTUP_DELAY_MS, CHECK_INTERVAL_MS };
