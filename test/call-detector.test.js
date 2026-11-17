@@ -112,3 +112,12 @@ test('names match case-insensitively and malformed snapshots are ignored', () =>
   detector.update([{ pid: 4, name: 'Zoom' }], 5000);
   assert.deepEqual(events, [['started', 'zoom']]);
 });
+
+test('status() reports the call in progress', () => {
+  const detector = new CallDetector();
+  assert.deepEqual(detector.status(), { inCall: false, app: null, heldSince: null, lastHeldAt: null });
+  detector.update([{ pid: 1, name: 'chrome' }], 1000);
+  assert.deepEqual(detector.status(), { inCall: false, app: null, heldSince: 1000, lastHeldAt: null });
+  detector.update([{ pid: 1, name: 'chrome' }], 4000);
+  assert.deepEqual(detector.status(), { inCall: true, app: 'chrome', heldSince: 1000, lastHeldAt: 4000 });
+});
