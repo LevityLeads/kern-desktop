@@ -8,6 +8,10 @@ on:
   pull_request:
     paths:
       - 'main.js'
+      - 'updater.js'
+      - 'browsers.js'
+      - 'edit-menu.js'
+      - 'preload.js'
       - 'recorder/**'
       - 'recorder-ui/**'
       - 'native/**'
@@ -56,13 +60,14 @@ jobs:
         run: npm run build:helper
 
       # Stamp the build identity into package.json AFTER tests, BEFORE packaging. The version
-      # becomes 1.1.0-capture.<run>, which names the installer, shows in Windows Apps, and is
+      # becomes <package version>-capture.<run>, which names the installer, shows in Windows Apps, and is
       # what the recorder window, every status event and every recording manifest report.
-      # It sorts above the published 1.0.3 release, so electron-updater never downgrades a spike.
+      # It sorts below the release it is based on and above earlier releases.
       - name: Stamp build identity
         shell: bash
         run: |
-          npm version "1.1.0-capture.${{ github.run_number }}" --no-git-tag-version
+          base="$(node -p "require('./package.json').version")"
+          npm version "${base}-capture.${{ github.run_number }}" --no-git-tag-version
           npm pkg set kernBuild.sha="${{ github.sha }}" kernBuild.run="${{ github.run_number }}" kernBuild.builtAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           node -e "const b=require('./recorder/build-info').readBuildInfo();console.log('build label:',b.label)"
 

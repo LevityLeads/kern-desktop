@@ -16,13 +16,20 @@ const {
   session,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { createDesktopRecorder } = require('./recorder/desktop-recorder');
-const { UpdateGuard } = require('./recorder/update-guard');
 const { withRecordingDot } = require('./recorder/tray-icon');
+const {
+  availableBrowsers,
+  launchBrowser,
+  parseOpenRequest,
+  isTrustedOrigin,
+  isOutlookWebUrl,
+} = require('./browsers');
+const { attachEditMenu } = require('./edit-menu');
+const { setupAutoUpdater } = require('./updater');
 
 // ------------------------------------------------------------------
 // Kern host resolution.
@@ -79,52 +86,16 @@ function normaliseKernUrl(input) {
 let kernUrl = null;
 
 // ------------------------------------------------------------------
-// Open external links in Google Chrome, not the OS default browser.
+// External links open in Google Chrome, not the OS default browser.
 // Falls back to the OS default (shell.openExternal) if Chrome isn't
-// found or fails to launch.
+// found or fails to launch. Browser discovery lives in browsers.js.
 // ------------------------------------------------------------------
-function launchChrome(url) {
-  const platform = process.platform;
-  let cmd;
-  let args;
-
-  if (platform === 'win32') {
-    const candidates = [
-      path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env['LOCALAPPDATA'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    ];
-    cmd = candidates.find((c) => {
-      try {
-        return c && fs.existsSync(c);
-      } catch {
-        return false;
-      }
-    });
-    if (!cmd) return false; // Chrome not installed, let caller fall back
-    args = [url];
-  } else if (platform === 'darwin') {
-    cmd = 'open';
-    args = ['-a', 'Google Chrome', url];
-  } else {
-    cmd = 'google-chrome';
-    args = [url];
-  }
-
-  try {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
-    // If the launch fails asynchronously (e.g. Chrome missing on
-    // mac/linux), fall back to the OS default browser.
-    child.once('error', () => shell.openExternal(url));
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function openExternalUrl(url) {
-  if (!launchChrome(url)) shell.openExternal(url);
+  const fallback = () => shell.openExternal(url);
+  // Outlook web links open in Edge as an app window (see browsers.js for why
+  // the Outlook app itself cannot take them). Anything else prefers Chrome.
+  if (isOutlookWebUrl(url) && launchBrowser('edge', url, fallback, { appWindow: true })) return;
+  if (!launchBrowser('chrome', url, fallback)) fallback();
 }
 
 // ------------------------------------------------------------------
@@ -167,7 +138,7 @@ let mainWindow = null;
 let setupWindow = null;
 let tray = null;
 let recorder = null;
-let updateGuard = null;
+let updater = null;
 let quitFinalising = false;
 let trayIcons = null;
 
@@ -298,7 +269,14 @@ if (!gotLock) {
     }
     setupRecorder();
     createTray();
-    setupAutoUpdater();
+    updater = setupAutoUpdater({
+      autoUpdater,
+      app,
+      powerMonitor,
+      Notification,
+      getWindow: () => mainWindow,
+      isBusy: recordingIsActive,
+    });
   });
 }
 
@@ -335,6 +313,7 @@ function createSetupWindow(errorMessage) {
   });
 
   setupWindow.setMenuBarVisibility(false);
+  attachEditMenu(setupWindow.webContents);
 
   const query = {};
   const existing = store.get('kernUrl');
@@ -389,6 +368,37 @@ ipcMain.handle('kern-setup:cancel', () => {
 });
 
 // ------------------------------------------------------------------
+// Browser-choice API for the web app (window.electronAPI.openUrl and
+// availableBrowsers, see preload.js).
+//
+// The page is remote content, so these channels are a trust boundary:
+// the call must come from the main window's frame, at the configured
+// Kern origin, and the arguments are validated before anything is
+// launched. Anything that fails a check gets `false` / `[]`.
+// ------------------------------------------------------------------
+function isTrustedSender(event) {
+  try {
+    if (!kernUrl || !mainWindow || mainWindow.isDestroyed()) return false;
+    if (event.sender !== mainWindow.webContents) return false;
+    return isTrustedOrigin(event.senderFrame && event.senderFrame.url, kernUrl);
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle('kern:open-url', (event, url, browser) => {
+  if (!isTrustedSender(event)) return false;
+  const request = parseOpenRequest(url, browser);
+  if (!request) return false;
+  return launchBrowser(request.browser, request.href);
+});
+
+ipcMain.handle('kern:available-browsers', (event) => {
+  if (!isTrustedSender(event)) return [];
+  return availableBrowsers();
+});
+
+// ------------------------------------------------------------------
 // Window creation
 // ------------------------------------------------------------------
 function createWindow() {
@@ -439,6 +449,8 @@ function createWindow() {
     mainWindow.show();
   });
 
+  attachEditMenu(mainWindow.webContents);
+
   mainWindow.loadURL(kernUrl);
 
   // ------------------------------------
@@ -450,7 +462,7 @@ function createWindow() {
   // and reopen setup instead of leaving a dead window on screen.
   // ------------------------------------
   mainWindow.webContents.on('did-navigate', (_event, url, httpResponseCode) => {
-    if (!kernUrl || !url.startsWith(kernUrl)) return;
+    if (!kernUrl || !isTrustedOrigin(url, kernUrl)) return;
     if (httpResponseCode && httpResponseCode >= 400) {
       createSetupWindow(
         `${kernUrl} answered ${httpResponseCode}. Check the address, or update it if the host has moved.`
@@ -563,7 +575,7 @@ function createWindow() {
   // Open external links in the default browser
   // ------------------------------------
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (kernUrl && url.startsWith(kernUrl)) {
+    if (kernUrl && isTrustedOrigin(url, kernUrl)) {
       return { action: 'allow' };
     }
     openExternalUrl(url);
@@ -572,7 +584,7 @@ function createWindow() {
 
   // Catch in-page navigations to external domains
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!kernUrl || !url.startsWith(kernUrl)) {
+    if (!kernUrl || !isTrustedOrigin(url, kernUrl)) {
       event.preventDefault();
       openExternalUrl(url);
     }
@@ -619,7 +631,7 @@ function setupRecorder() {
     signIn: focusMainWindow,
     openKernUrl,
   });
-  recorder.on('state', () => updateGuard?.captureStateChanged());
+  recorder.on('state', () => updater?.busyChanged());
   // Fires at most once a second (the tooltip clock); the menu and icon change only with state.
   recorder.on('tray', ({ menuChanged, iconChanged, tooltip, recording }) => {
     if (!tray) return;
@@ -717,33 +729,6 @@ async function requestQuit() {
     app.isQuitting = true;
     app.quit();
   }
-}
-
-// ------------------------------------------------------------------
-// Auto-updater (wired up, configured via electron-builder publish)
-// ------------------------------------------------------------------
-function setupAutoUpdater() {
-  updateGuard = new UpdateGuard(autoUpdater, recordingIsActive);
-  updateGuard.configure();
-
-  autoUpdater.on('update-available', (info) => {
-    console.log('Update available:', info.version);
-  });
-
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('Update downloaded:', info.version);
-  });
-
-  autoUpdater.on('error', (err) => {
-    console.error('Auto-updater error:', err);
-  });
-
-  // Check for updates after a short delay (don't block startup)
-  setTimeout(() => {
-    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.error('Update check failed:', err);
-    });
-  }, 5000);
 }
 
 // ------------------------------------------------------------------

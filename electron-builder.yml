@@ -9,6 +9,9 @@ directories:
 files:
   - main.js
   - preload.js
+  - browsers.js
+  - edit-menu.js
+  - updater.js
   - setup.html
   - setup-preload.js
   - recorder/**/*
