@@ -3,7 +3,9 @@
 const { CallDetector } = require('./call-detector');
 
 const TICK_MS = 1000;
-const DISPLAY_NAMES = Object.freeze({ 'ms-teams': 'Teams', msteams: 'Teams', teams: 'Teams', zoom: 'Zoom', chrome: 'Chrome', msedge: 'Edge' });
+const DISPLAY_NAMES = Object.freeze({
+  'ms-teams': 'Teams', 'ms-teams_modulehost': 'Teams', msteams: 'Teams', teams: 'Teams', zoom: 'Zoom', chrome: 'Chrome', msedge: 'Edge',
+});
 
 function displayName(app) {
   return DISPLAY_NAMES[String(app).toLowerCase()] || String(app);

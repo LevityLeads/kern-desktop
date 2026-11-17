@@ -4,7 +4,9 @@ const { EventEmitter } = require('events');
 
 // Process names (lower-case, no .exe) of the apps whose microphone use counts as a call. Browsers
 // are here because Meet, Teams on the web and Zoom on the web all hold the mic from the browser.
-const CALL_APPS = Object.freeze(['ms-teams', 'msteams', 'teams', 'zoom', 'chrome', 'msedge']);
+// ms-teams_modulehost: new Teams runs its calling stack in this child process (Windows client update,
+// January 2026), so during a call it, not ms-teams, holds the mic session.
+const CALL_APPS = Object.freeze(['ms-teams', 'ms-teams_modulehost', 'msteams', 'teams', 'zoom', 'chrome', 'msedge']);
 // Kern and its recorder helper hold the mic whenever Kern records. They must never start or sustain a call.
 const OWN_APPS = Object.freeze(['kern', 'kern.recorder.helper']);
 const START_HOLD_MS = 3000;

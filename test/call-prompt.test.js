@@ -43,8 +43,8 @@ function rig({ callPrompt = true, noticeAcknowledged = true, startImpl } = {}) {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 test('display names', () => {
-  assert.deepEqual(['ms-teams', 'msteams', 'teams', 'zoom', 'chrome', 'msedge'].map(displayName),
-    ['Teams', 'Teams', 'Teams', 'Zoom', 'Chrome', 'Edge']);
+  assert.deepEqual(['ms-teams', 'ms-teams_modulehost', 'msteams', 'teams', 'zoom', 'chrome', 'msedge'].map(displayName),
+    ['Teams', 'Teams', 'Teams', 'Teams', 'Zoom', 'Chrome', 'Edge']);
 });
 
 test('starts the watcher', () => {
