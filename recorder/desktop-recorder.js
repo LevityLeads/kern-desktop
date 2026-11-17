@@ -14,6 +14,7 @@ const { Connectivity } = require('./connectivity');
 const { MicWatcher } = require('./mic-watcher');
 const { createCallPrompt } = require('./call-prompt');
 const { PromptCard } = require('./prompt-card');
+const { MicSilenceMonitor } = require('./mic-silence');
 const { IPC } = require('./protocol');
 const { isRecordingIcon, trayItems, traySignature, trayTooltip } = require('./tray-model');
 
@@ -52,7 +53,7 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
   // callPrompt.start() below has run, by which time the controller exists.
   const callPrompt = createCallPrompt({
     watcher: new MicWatcher({ helperPath, log }), card, settings, supervisor, Notification, log,
-    start: () => controller.start(), showRecorder: () => controller.show(),
+    start: (options) => controller.start(options), showRecorder: () => controller.show(),
   });
   const service = new CallService({ root: recordingsRoot, pipeline, supervisor, callPrompt });
   const controller = new RecorderController({
@@ -63,6 +64,17 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
   const connectivity = new Connectivity({ isOnline: () => net.isOnline() });
   const report = (what) => (error) => log.error(`Recorder ${what} failed:`, error?.message || error);
   const callsChanged = debounce(() => controller.send(IPC.CALLS_CHANGED, {}), CALLS_CHANGED_DEBOUNCE_MS);
+  // A recording whose microphone sends only silence gets a card over the call, not a toast.
+  const micSilence = new MicSilenceMonitor();
+  let micAlert = null;
+  const warnSilentMic = ({ name }) => {
+    try {
+      micAlert = card.show({
+        title: "Kern can't hear your mic", body: `${name} is sending only silence. Your side isn't being recorded.`,
+        primary: 'Open recorder', secondary: 'Dismiss', onPrimary: () => controller.show(),
+      });
+    } catch (error) { report('mic alert')(error); }
+  };
 
   let lastState = null, lastSignature = null, lastTooltip = null, lastRecording = null;
   supervisor.on('status', (status) => {
@@ -78,11 +90,15 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
       lastSignature = signature; lastTooltip = tooltip; lastRecording = recording;
     }
     presentCaptureAlert(alerts.update(status), { showRecorder: () => controller.show(), Notification, reportError: report('alert') });
+    const silent = micSilence.update(status, Date.now());
+    if (silent) warnSilentMic(silent);
   });
   supervisor.on('started', ({ sessionId, context }) => {
     pipeline.onStarted(sessionId, { transcribe: context?.transcribe === true }).catch(report('call start'));
   });
   supervisor.on('ended', (detail) => {
+    micAlert?.close();
+    micAlert = null;
     pipeline.onEnded(detail).catch(report('call end'));
   });
 

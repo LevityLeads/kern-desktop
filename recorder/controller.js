@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { IPC } = require('./protocol');
+const { IPC, validateMicrophoneSelection } = require('./protocol');
 const { registerRecorderIpc } = require('./ipc');
 const { createRecorderWindow } = require('./window');
 
@@ -61,11 +61,13 @@ class RecorderController {
   }
 
   // Consent is decided here, not by the renderer: the one-time notice must have been seen, and
-  // whether this call is transcribed is fixed at the moment it starts.
-  async start() {
+  // whether this call is transcribed is fixed at the moment it starts. microphone: main-process
+  // callers only (the call card passes the call's own microphone); the window always uses the saved one.
+  async start({ microphone } = {}) {
     const { enabled, noticeAcknowledged } = this.settings.get();
     if (!noticeAcknowledged) throw new Error('Read the recording notice first.');
-    return this.supervisor.start({ microphone: this.microphone(), context: { transcribe: enabled } });
+    const selection = microphone ? validateMicrophoneSelection(microphone) : this.microphone();
+    return this.supervisor.start({ microphone: selection, context: { transcribe: enabled } });
   }
 
   async confirmDelete(sessionId) {

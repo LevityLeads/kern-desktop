@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('events');
 const { spawn } = require('child_process');
+const { validateMicrophoneSelection } = require('./protocol');
 
 const BACKOFF_START_MS = 2000;
 const BACKOFF_MAX_MS = 5 * 60 * 1000;
@@ -17,7 +18,14 @@ function parseErrorLine(line) {
   return message.code.slice(0, MAX_NAME_LENGTH);
 }
 
+// The endpoint a holder's session is on, when it is one the recorder could be told to open; else null.
+function endpointOf(value) {
+  if (value === undefined) return null;
+  try { return validateMicrophoneSelection({ mode: 'device', deviceId: value }).deviceId; } catch { return null; }
+}
+
 // One stdout line from `Kern.Recorder.Helper.exe --mic-watch`, or null when it is not a mic snapshot.
+// Each holder is { pid, name, endpoint } (endpoint null when the helper did not name a usable one).
 function parseMicLine(line) {
   let message;
   try { message = JSON.parse(line); } catch { return null; }
@@ -25,14 +33,14 @@ function parseMicLine(line) {
   const apps = [];
   for (const app of message.apps.slice(0, MAX_APPS)) {
     if (Number.isInteger(app?.pid) && app.pid > 0 && typeof app.name === 'string' && app.name.length > 0 && app.name.length <= MAX_NAME_LENGTH) {
-      apps.push({ pid: app.pid, name: app.name.toLowerCase() });
+      apps.push({ pid: app.pid, name: app.name.toLowerCase(), endpoint: endpointOf(app.endpoint) });
     }
   }
   return apps;
 }
 
 // Keeps a `--mic-watch` helper running and reports who holds the microphone.
-// Events: 'apps' [{ pid, name }] on every snapshot, and [] whenever the helper is not running
+// Events: 'apps' [{ pid, name, endpoint }] on every snapshot, and [] whenever the helper is not running
 // (an unknown mic is treated as nobody holding it, so a dead watcher never keeps a call alive).
 class MicWatcher extends EventEmitter {
   constructor({ helperPath, platform = process.platform, parentPid = process.pid, spawnProcess = spawn,

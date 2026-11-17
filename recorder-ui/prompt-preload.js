@@ -7,5 +7,5 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNEL = 'kern-call-prompt:choose';
 
 contextBridge.exposeInMainWorld('kernCallPrompt', Object.freeze({
-  choose: (choice) => ipcRenderer.send(CHANNEL, choice === 'record' ? 'record' : 'dismiss'),
+  choose: (choice) => ipcRenderer.send(CHANNEL, choice === 'primary' ? 'primary' : 'dismiss'),
 }));
