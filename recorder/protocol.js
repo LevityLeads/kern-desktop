@@ -25,7 +25,6 @@ const IPC = Object.freeze({
   RENAME_CALL: 'kern-recorder:rename-call',
   RETRY_CALL: 'kern-recorder:retry-call',
   DELETE_CALL: 'kern-recorder:delete-call',
-  COPY_TRANSCRIPT: 'kern-recorder:copy-transcript',
   COPY_DIAGNOSTICS: 'kern-recorder:copy-diagnostics',
   OPEN_SUMMARY: 'kern-recorder:open-summary',
   SIGN_IN: 'kern-recorder:sign-in',
@@ -130,10 +129,6 @@ const VALIDATORS = Object.freeze({
   })),
   [IPC.RETRY_CALL]: session,
   [IPC.DELETE_CALL]: session,
-  [IPC.COPY_TRANSCRIPT]: p => shaped(p, ['sessionId', 'format'], v => {
-    if (v.format !== 'text' && v.format !== 'markdown') throw new TypeError('format must be text or markdown');
-    return { sessionId: assertSessionId(v.sessionId), format: v.format };
-  }),
   [IPC.COPY_DIAGNOSTICS]: p => shaped(p, ['sessionId'], v => ({
     sessionId: v.sessionId === null ? null : assertSessionId(v.sessionId),
   })),

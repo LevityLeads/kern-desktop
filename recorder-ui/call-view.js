@@ -1,36 +1,17 @@
 'use strict';
 
-// One call: title, date, progress, transcript with Find, copy, summary link, delete.
+// One call's status: title, date, Recording / Processing / Ready, progress, and Open in Kern once
+// the call has a summary thread. The transcript itself lives in Kern, not here.
 window.createCallView = function createCallView({ api, reportError, onBanner, onBack }) {
   const $ = (id) => document.getElementById(id);
   const el = Object.fromEntries(['call', 'back', 'call-title', 'call-meta', 'call-progress', 'call-progress-fill',
-    'call-progress-label', 'call-note', 'call-summary', 'copy-text', 'copy-md', 'find', 'find-count', 'transcript',
-    'transcript-empty', 'copy-diagnostics', 'delete-call'].map((id) => [id, $(id)]));
+    'call-progress-label', 'call-note', 'call-summary', 'copy-diagnostics', 'delete-call'].map((id) => [id, $(id)]));
   const format = window.recorderFormat;
   let sessionId = null;
   let view = null;
-  let renderedItems = '';
   let request = 0;
 
   const set = (node, key, value) => { if (node[key] !== value) node[key] = value; };
-
-  function emptyText() {
-    if (view.legacy) return 'This older recording has no transcript.';
-    if (view.stage === 'recording') return 'The transcript fills in here about a minute behind the call.';
-    if (view.stage === 'complete') return 'No speech was detected in this call.';
-    if (view.stage === 'publishing' || view.stage === 'transcribing') return 'Transcribing. This usually takes a few minutes.';
-    return 'No transcript yet.';
-  }
-
-  function renderItems() {
-    const key = `${el.find.value}|${JSON.stringify(view.items)}`;
-    if (key === renderedItems) return;
-    renderedItems = key;
-    const matches = window.renderTurns(el.transcript, view.items, { query: el.find.value });
-    set(el['find-count'], 'textContent', el.find.value.trim() ? `${matches} found` : '');
-    el['transcript-empty'].hidden = view.items.length > 0;
-    set(el['transcript-empty'], 'textContent', emptyText());
-  }
 
   function render() {
     if (document.activeElement !== el['call-title']) {
@@ -47,11 +28,7 @@ window.createCallView = function createCallView({ api, reportError, onBanner, on
     el['call-note'].hidden = !view.note;
     set(el['call-note'], 'textContent', view.note || '');
     el['call-summary'].hidden = !view.hasSummary;
-    const hasText = view.items.some((item) => item.kind === 'turn');
-    el['copy-text'].disabled = !hasText;
-    el['copy-md'].disabled = !hasText;
     el['delete-call'].disabled = !view.canDelete;
-    renderItems();
     onBanner(view.banner, sessionId);
   }
 
@@ -66,19 +43,7 @@ window.createCallView = function createCallView({ api, reportError, onBanner, on
     } catch (error) { if (token === request) reportError(error); }
   }
 
-  async function copy(button, format) {
-    const label = button.textContent;
-    try {
-      await api.copyTranscript(sessionId, format);
-      button.textContent = 'Copied';
-      setTimeout(() => { button.textContent = label; }, 1500);
-    } catch (error) { reportError(error); }
-  }
-
   el.back.addEventListener('click', () => onBack());
-  el['copy-text'].addEventListener('click', () => copy(el['copy-text'], 'text'));
-  el['copy-md'].addEventListener('click', () => copy(el['copy-md'], 'markdown'));
-  el.find.addEventListener('input', () => { if (view) renderItems(); });
   el['call-summary'].addEventListener('click', () => api.openSummary(sessionId).catch(reportError));
   el['copy-diagnostics'].addEventListener('click', async () => {
     try {
@@ -106,9 +71,6 @@ window.createCallView = function createCallView({ api, reportError, onBanner, on
     async open(id) {
       sessionId = id;
       view = null;
-      renderedItems = '';
-      el.find.value = '';
-      el.transcript.replaceChildren();
       el['call-title'].value = '';
       await refresh();
     },

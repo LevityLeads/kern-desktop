@@ -40,11 +40,9 @@ function load(apiOverrides = {}) {
   const listeners = {};
   const calls = [];
   const view = { sessionId: ID, title: null, startedAtUtc: '2026-09-22T10:00:00Z', durationMs: 120000, live: false,
-    chip: { kind: 'working', label: 'Transcribing 1/2' }, legacy: false, stage: 'transcribing',
+    chip: { kind: 'working', label: 'Processing' }, legacy: false, stage: 'transcribing',
     progress: { label: 'Transcribing 1/2 min', fraction: 0.5 }, banner: { message: 'Sign in to Kern to finish transcribing this call.', action: 'sign-in' },
-    note: null, items: [{ kind: 'turn', speaker: 'me', startMs: 1000, endMs: 2000, text: 'Hello there' }, { kind: 'gap', startMs: 60000 },
-      { kind: 'turn', speaker: 'them', startMs: 61000, endMs: 62000, text: 'hello back' }],
-    partial: true, hasSummary: false, canRename: true, canDelete: true };
+    note: null, hasSummary: false, canRename: true, canDelete: true };
   const api = {
     getStatus: async () => ({ state: 'idle', sessionId: null, levels: { me: 0, them: 0 }, failure: null }),
     getSetup: async () => ({ microphone: { mode: 'default' }, transcription: { enabled: true, noticeAcknowledged: false }, build: '1.1.0+abc1234' }),
@@ -61,7 +59,7 @@ function load(apiOverrides = {}) {
   const context = vm.createContext({ window, document, Option: function Option(text, value) { this.text = text; this.value = value; },
     setTimeout, clearTimeout, setInterval, clearInterval, Date, JSON, Math, Number, String, Promise, Set, Map, Object, Array });
   for (const script of SCRIPTS) vm.runInContext(fs.readFileSync(path.join(UI, script), 'utf8'), context, { filename: script });
-  return { el: document.getElementById, listeners, calls, view, document };
+  return { el: document.getElementById, has: (id) => nodes.has(id), listeners, calls, view, document };
 }
 
 test('idle: one Start, mic named on one line, the one-time notice before the first recording', async () => {
@@ -102,20 +100,28 @@ test('recording: timer, You/Them levels, Stop/Mute/Pause, then Stop opens the ca
   assert.deepEqual(ui.calls, ['sign-in']);
 });
 
-test('call view: You/Them turns with timestamps, a gap marker, and Find filters with highlights', async () => {
-  const ui = load();
+test('call view: status only, Open in Kern appears only when the call has a summary', async () => {
+  const opened = [];
+  const ui = load({ openSummary: async (id) => { opened.push(id); } });
   await settle(); await settle();
   ui.listeners.onOpenCall({ sessionId: ID });
   await settle(); await settle();
-  const transcript = ui.el('transcript');
-  assert.equal(transcript.children.length, 3);
-  assert.equal(transcript.children[0].textContent, 'You00:01Hello there');
-  assert.equal(transcript.children[1].textContent, '[a minute of audio could not be transcribed]');
-  ui.el('find').value = 'hello';
-  ui.el('find').listeners.input();
-  assert.equal(transcript.children.length, 2);
-  assert.equal(ui.el('find-count').textContent, '2 found');
-  assert.equal(transcript.children[1].children[1].children[0].tag, 'mark');
+  assert.equal(ui.el('call').hidden, false);
+  assert.match(ui.el('call-meta').textContent, /Processing$/);
+  assert.equal(ui.el('call-summary').hidden, true);
+  const html = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
+  assert.match(html, /id="call-summary"[^>]*>Open in Kern</);
+  for (const gone of ['transcript', 'find', 'copy-text', 'copy-md', 'tail']) {
+    assert.equal(ui.has(gone), false, gone);
+    assert.equal(html.includes(`id="${gone}"`), false, gone);
+  }
+  Object.assign(ui.view, { chip: { kind: 'ready', label: 'Ready' }, stage: 'complete', progress: null, banner: null, hasSummary: true });
+  ui.listeners.onCallsChanged();
+  await settle(); await settle();
+  assert.match(ui.el('call-meta').textContent, /Ready$/);
+  assert.equal(ui.el('call-summary').hidden, false);
+  await ui.el('call-summary').listeners.click();
+  assert.deepEqual(opened, [ID]);
 });
 
 test('a start failure shows one sentence with "Choose another mic"', async () => {

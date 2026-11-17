@@ -1,13 +1,12 @@
 'use strict';
 
-// The capture card: one Start button when idle; timer, levels, Stop/Mute/Pause and the live
-// transcript tail while recording. Status arrives twice a second; only text and bar widths
-// that actually changed are touched.
+// The capture card: one Start button when idle; timer, levels and Stop/Mute/Pause while
+// recording. Status arrives twice a second; only text and bar widths that actually changed are touched.
 window.createHome = function createHome({ api, reportError, onCaptureBanner }) {
   const $ = (id) => document.getElementById(id);
   const el = Object.fromEntries(['idle', 'recording', 'start', 'mic-name', 'mic-change', 'mic-picker', 'mic-select',
     'transcription-state', 'transcription-toggle', 'call-prompt-state', 'call-prompt-toggle', 'notice', 'notice-ok', 'timer', 'rec-state', 'rec-dot', 'level-me',
-    'level-them', 'them-hint', 'rec-warning', 'stop', 'mute', 'pause', 'tail', 'tail-empty'].map((id) => [id, $(id)]));
+    'level-them', 'them-hint', 'rec-warning', 'stop', 'mute', 'pause'].map((id) => [id, $(id)]));
   const format = window.recorderFormat;
   const ACTIVE = new Set(['starting', 'recording', 'paused', 'stopping']);
   const THEM_SILENCE_HINT_MS = 60000;
@@ -151,10 +150,6 @@ window.createHome = function createHome({ api, reportError, onCaptureBanner }) {
       return setup;
     },
     renderStatus,
-    renderTail(items) {
-      window.renderTurns(el.tail, items.slice(-6));
-      set(el['tail-empty'], 'hidden', items.length > 0);
-    },
     chooseMic() { el['mic-picker'].hidden = false; loadDevices(); el['mic-select'].focus(); },
     status: () => status,
   };

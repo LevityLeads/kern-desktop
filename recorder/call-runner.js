@@ -3,7 +3,7 @@
 const catalog = require('./session-catalog');
 const { CallError } = require('./safe-fs');
 const { caller, ensureRemote, finalize, publishFinal, publishLive } = require('./call-publisher');
-const { fetchTranscript, remoteStatus } = require('./call-cloud');
+const { remoteStatus } = require('./call-cloud');
 const { finalDuration } = require('./window-cutter');
 
 // One pass of the call pipeline for one call. Each pass does whatever the call needs next and
@@ -12,9 +12,10 @@ const { finalDuration } = require('./window-cutter');
 const LIVE_INTERVAL_MS = 5000;
 const POLL_INTERVAL_MS = 5000;
 const DELETE_RETRY_MS = 60000;
-// Kern posts its summary thread a little after the transcript; keep looking for a while.
+// Kern posts its summary thread a little after the transcript, and an HLTH call waits out the
+// Teams transcript grace period first; keep looking for a while.
 const SUMMARY_POLL_MS = 60000;
-const SUMMARY_WAIT_MS = 30 * 60000;
+const SUMMARY_WAIT_MS = 4 * 60 * 60000;
 const GONE = new Set(['deleting', 'deleted']);
 const PUBLISHABLE = new Set(['live', 'uploading']);
 
@@ -50,23 +51,31 @@ async function deleteAudio(ctx, state) {
   return null;
 }
 
-// Best effort, never an error: a complete call stays complete whatever happens here.
+// Whether a finished call is still waiting to tell the user its summary is ready.
+function summaryPending(state, now) {
+  return state.stage === 'complete' && Boolean(state.remoteId) && !state.summaryNotifiedAt &&
+    now - Date.parse(state.completedAt) < SUMMARY_WAIT_MS;
+}
+
+// Best effort, never an error: a complete call stays complete whatever happens here. The
+// notification fires once, when the summary thread first exists; summaryNotifiedAt is saved
+// first, so a crash or restart never repeats it.
 async function awaitSummary(ctx, state) {
-  if (state.cloud.kernThreadUrl || !state.remoteId) return null;
-  if (!(ctx.now() - Date.parse(state.completedAt) < SUMMARY_WAIT_MS)) return null;
-  try {
-    const remote = await remoteStatus(ctx, state);
-    if (remote.kernThreadUrl) {
-      state.cloud = remote;
-      await ctx.save(state);
-      return null;
-    }
-  } catch { /* try again on the next poll */ }
-  return SUMMARY_POLL_MS;
+  if (!summaryPending(state, ctx.now())) return null;
+  if (!state.cloud.kernThreadUrl) {
+    try {
+      const remote = await remoteStatus(ctx, state);
+      if (remote.kernThreadUrl) state.cloud = remote;
+    } catch { /* try again on the next poll */ }
+    if (!state.cloud.kernThreadUrl) return SUMMARY_POLL_MS;
+  }
+  state.summaryNotifiedAt = new Date(ctx.now()).toISOString();
+  await ctx.save(state);
+  ctx.onSummary(state);
+  return null;
 }
 
 async function complete(ctx, state) {
-  state.transcript = { windows: await fetchTranscript(ctx, state) };
   state.stage = 'complete';
   state.completedAt = new Date(ctx.now()).toISOString();
   state.error = null;
@@ -132,4 +141,4 @@ async function runCall(ctx, state) {
   return POLL_INTERVAL_MS;
 }
 
-module.exports = { LIVE_INTERVAL_MS, POLL_INTERVAL_MS, runCall, settleEnd };
+module.exports = { LIVE_INTERVAL_MS, POLL_INTERVAL_MS, SUMMARY_WAIT_MS, runCall, settleEnd, summaryPending };

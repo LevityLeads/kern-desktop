@@ -53,10 +53,10 @@ test('payload validation runs before any handler', async () => {
   const f = fixture();
   await assert.rejects(f.callbacks.get(IPC.GET_CALL)(f.event, { sessionId: SESSION_ID, path: 'C:\\audio.pcm' }));
   await assert.rejects(f.callbacks.get(IPC.START)(f.event, { microphone: { mode: 'default' } }), /not allowed/);
-  await assert.rejects(f.callbacks.get(IPC.COPY_TRANSCRIPT)(f.event, { sessionId: SESSION_ID, format: 'html' }));
   assert.equal(f.calls.length, 0);
-  await f.callbacks.get(IPC.COPY_TRANSCRIPT)(f.event, { sessionId: SESSION_ID.toUpperCase(), format: 'markdown' });
-  assert.deepEqual(f.calls, [{ channel: IPC.COPY_TRANSCRIPT, payload: { sessionId: SESSION_ID, format: 'markdown' } }]);
+  await f.callbacks.get(IPC.OPEN_SUMMARY)(f.event, { sessionId: SESSION_ID.toUpperCase() });
+  assert.deepEqual(f.calls, [{ channel: IPC.OPEN_SUMMARY, payload: { sessionId: SESSION_ID } }]);
+  assert.equal(IPC.COPY_TRANSCRIPT, undefined);
 });
 
 test('session ids, titles and mic selections are strictly shaped', () => {

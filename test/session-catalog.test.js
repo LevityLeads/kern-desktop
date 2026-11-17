@@ -32,7 +32,7 @@ function writeV1(root) {
   fs.writeFileSync(path.join(broken, 'manifest.json'), '{ not json');
 }
 
-test('older v1 recordings list read-only with their stored transcript; broken ones do not crash the list', async (t) => {
+test('older v1 recordings list read-only (date and length, no transcript); broken ones do not crash the list', async (t) => {
   const root = tempRoot(t);
   writeV1(root);
   writeSession(root, { frames: 30000 * 16 });
@@ -51,9 +51,9 @@ test('older v1 recordings list read-only with their stored transcript; broken on
   const old = await service(root).get(V1);
   assert.equal(old.legacy, true);
   assert.equal(old.canRename, false);
-  assert.deepEqual(old.items.map(i => [i.speaker, i.text]), [['me', 'old call'], ['them', 'still readable']]);
-  const broken = await service(root).get(BROKEN_V1);
-  assert.deepEqual(broken.items, []);
+  assert.equal(old.items, undefined);
+  assert.doesNotMatch(JSON.stringify(old), /still readable/);
+  assert.equal(old.chip.label, 'Older recording');
   assert.equal(await catalog.sessionKind(root, V1), 'v1');
 });
 
@@ -79,14 +79,14 @@ test('links inside a recording folder are refused', { skip: process.platform ===
   await assert.rejects(catalog.sessionDir(root, '../etc'), /sessionId is invalid/);
 });
 
-test('diagnostics carry session.json and call.json but never transcript text', async (t) => {
+test('diagnostics carry session.json and call.json but never transcript text, even from an older call.json', async (t) => {
   const root = tempRoot(t);
   writeSession(root, { frames: 16000 });
   fs.writeFileSync(path.join(root, SESSION, 'call.json'), JSON.stringify({ ...fresh(SESSION, { transcribe: true }), stage: 'complete',
     transcript: { windows: [{ index: 0, text: 'secret words', utterances: null }] } }));
   const report = JSON.parse(await service(root).diagnostics(SESSION));
   assert.equal(report.session.format, 'kern-call-audio/1');
-  assert.deepEqual(report.call.transcript, { windows: 1 });
+  assert.equal(report.call.transcript, undefined);
   assert.equal(report.audioFrames, 16000);
   assert.doesNotMatch(JSON.stringify(report), /secret words/);
 });

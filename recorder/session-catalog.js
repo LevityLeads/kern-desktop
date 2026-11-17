@@ -20,7 +20,6 @@ const DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
 const SESSION_STATES = new Set(['recording', 'paused', 'stopped', 'interrupted']);
 const MAX_SESSION_BYTES = 1024 * 1024;
 const MAX_V1_MANIFEST_BYTES = 32 * 1024 * 1024;
-const MAX_V1_STATE_BYTES = 8 * 1024 * 1024;
 
 function createSessionId() { return crypto.randomUUID(); }
 
@@ -77,20 +76,16 @@ async function audioPath(root, sessionId) {
   return safePath(await sessionDir(root, sessionId), FILES.AUDIO);
 }
 
-// A v1 recording: shown in the list with its stored transcript, never processed.
+// A v1 recording: shown in the list (date and length only), never processed.
 async function readLegacy(root, sessionId) {
   const dir = await sessionDir(root, sessionId);
-  const legacy = { sessionId, startedAtUtc: null, durationMs: 0, transcript: null };
+  const legacy = { sessionId, startedAtUtc: null, durationMs: 0 };
   try {
     const manifest = await readJsonFile(dir, FILES.V1_MANIFEST, MAX_V1_MANIFEST_BYTES);
     if (!isPlainObject(manifest) || manifest.protocolVersion !== 1 || manifest.sessionId !== sessionId) return legacy;
     if (validDate(manifest.startedAtUtc)) legacy.startedAtUtc = manifest.startedAtUtc;
     if (Number.isSafeInteger(manifest.durationMs) && manifest.durationMs > 0) legacy.durationMs = manifest.durationMs;
   } catch { return legacy; }
-  try {
-    const state = await readJsonFile(dir, FILES.V1_STATE, MAX_V1_STATE_BYTES);
-    if (isPlainObject(state) && state.sessionId === sessionId && isPlainObject(state.transcript)) legacy.transcript = state.transcript;
-  } catch { /* no stored transcript */ }
   return legacy;
 }
 

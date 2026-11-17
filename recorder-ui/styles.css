@@ -67,7 +67,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 #idle { display: grid; gap: 12px; justify-items: start; }
 #idle .primary { margin-bottom: 8px; }
 .picker { display: grid; gap: 4px; width: 100%; }
-select, .find, .title-input { background: var(--kern-canvas-inset); border: 0; border-bottom: 1px solid var(--kern-border); border-radius: 0; padding: 8px; }
+select, .title-input { background: var(--kern-canvas-inset); border: 0; border-bottom: 1px solid var(--kern-border); border-radius: 0; padding: 8px; }
 select { width: 100%; }
 .notice { display: grid; gap: 12px; padding: 16px; border-radius: var(--kern-radius-md); background: var(--kern-ink-whisper); font-size: 14px; }
 
@@ -82,7 +82,6 @@ select { width: 100%; }
 .bar { height: 8px; border-radius: var(--kern-radius-pill); background: var(--kern-ink-hair); overflow: hidden; }
 .fill { height: 100%; width: 100%; transform-origin: left; transform: scaleX(0); background: var(--kern-ink-soft); transition: transform 0.18s linear; }
 .rec-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.tail { display: grid; gap: 8px; padding-top: 16px; border-top: 1px solid var(--kern-ink-hair); }
 
 .calls { display: grid; gap: 12px; }
 .call-list { list-style: none; margin: 0; padding: 0; display: grid; }
@@ -100,17 +99,7 @@ select { width: 100%; }
 #call > .link { justify-self: start; }
 .title-input { font-size: 28px; font-weight: 480; letter-spacing: -0.015em; line-height: 1.25; padding: 4px 0; background: transparent; border-bottom-color: transparent; }
 .title-input:focus { border-bottom-color: var(--kern-accent); outline: none; }
-.tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-.find { flex: 1; min-width: 140px; }
-.turns { display: grid; gap: 16px; margin-top: 8px; user-select: text; }
-.turn { display: grid; gap: 2px; }
-.turn-head { display: flex; gap: 8px; align-items: baseline; }
-.who { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--kern-ink-soft); }
-.turn.them .who { color: var(--kern-ink-muted); }
-.time { font-size: 12px; color: var(--kern-ink-subtle); }
-.turn-text { font-size: 16px; line-height: 1.7; overflow-wrap: anywhere; }
-.turn-gap { font-size: 14px; font-style: italic; color: var(--kern-ink-subtle); }
-mark { background: var(--kern-accent-soft); color: var(--kern-ink); border-radius: 2px; }
+#call-summary { justify-self: start; }
 .call-footer { display: flex; justify-content: space-between; padding-top: 24px; margin-top: 16px; border-top: 1px solid var(--kern-ink-hair); }
 .app-footer { font-size: 12px; text-align: center; }
 .app-footer .link { font-size: 12px; }
