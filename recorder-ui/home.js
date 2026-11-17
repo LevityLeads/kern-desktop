@@ -6,7 +6,7 @@
 window.createHome = function createHome({ api, reportError, onCaptureBanner }) {
   const $ = (id) => document.getElementById(id);
   const el = Object.fromEntries(['idle', 'recording', 'start', 'mic-name', 'mic-change', 'mic-picker', 'mic-select',
-    'transcription-state', 'transcription-toggle', 'notice', 'notice-ok', 'timer', 'rec-state', 'rec-dot', 'level-me',
+    'transcription-state', 'transcription-toggle', 'call-prompt-state', 'call-prompt-toggle', 'notice', 'notice-ok', 'timer', 'rec-state', 'rec-dot', 'level-me',
     'level-them', 'them-hint', 'rec-warning', 'stop', 'mute', 'pause', 'tail', 'tail-empty'].map((id) => [id, $(id)]));
   const format = window.recorderFormat;
   const ACTIVE = new Set(['starting', 'recording', 'paused', 'stopping']);
@@ -34,6 +34,9 @@ window.createHome = function createHome({ api, reportError, onCaptureBanner }) {
     const on = setup.transcription.enabled;
     set(el['transcription-state'], 'textContent', on ? 'on' : 'off');
     set(el['transcription-toggle'], 'textContent', on ? 'turn off' : 'turn on');
+    const prompt = setup.transcription.callPrompt !== false;
+    set(el['call-prompt-state'], 'textContent', prompt ? 'on' : 'off');
+    set(el['call-prompt-toggle'], 'textContent', prompt ? 'turn off' : 'turn on');
     el.start.disabled = busy || ACTIVE.has(status.state);
   }
 
@@ -130,6 +133,10 @@ window.createHome = function createHome({ api, reportError, onCaptureBanner }) {
   }));
   el['transcription-toggle'].addEventListener('click', () => run(async () => {
     setup.transcription = await api.setTranscription(!setup.transcription.enabled);
+    renderSetup();
+  }));
+  el['call-prompt-toggle'].addEventListener('click', () => run(async () => {
+    setup.transcription = await api.setCallPrompt(setup.transcription.callPrompt === false);
     renderSetup();
   }));
   el.stop.addEventListener('click', () => run(() => api.stop()));

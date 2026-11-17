@@ -243,6 +243,10 @@ function getMaterialOptions() {
   };
 }
 
+// Windows attributes toast notifications to this id. It matches the installer's appId, so the
+// call prompt and update toasts show as "Kern" with the app icon. Must run before any Notification.
+if (process.platform === 'win32') app.setAppUserModelId('com.levityleads.kern');
+
 // ------------------------------------------------------------------
 // Single instance lock
 // ------------------------------------------------------------------

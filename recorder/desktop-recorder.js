@@ -11,6 +11,8 @@ const { MicrophonePreference } = require('./microphone-preference');
 const { RecorderController } = require('./controller');
 const { CaptureHealthAlerts, presentCaptureAlert } = require('./capture-health-alerts');
 const { Connectivity } = require('./connectivity');
+const { MicWatcher } = require('./mic-watcher');
+const { createCallPrompt } = require('./call-prompt');
 const { IPC } = require('./protocol');
 const { isRecordingIcon, trayItems, traySignature, trayTooltip } = require('./tray-model');
 
@@ -48,6 +50,10 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
   const controller = new RecorderController({
     BrowserWindow, ipcMain, dialog, clipboard, appRoot, getParentWindow: getMainWindow,
     supervisor, pipeline, service, settings, microphones, signIn, openKernUrl,
+  });
+  const callPrompt = createCallPrompt({
+    watcher: new MicWatcher({ helperPath, log }), settings, supervisor, Notification, log,
+    start: () => controller.start(), showRecorder: () => controller.show(),
   });
   const alerts = new CaptureHealthAlerts();
   const connectivity = new Connectivity({ isOnline: () => net.isOnline() });
@@ -95,6 +101,7 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
   const signInChanged = debounce(() => pipeline.kick(), SIGN_IN_DEBOUNCE_MS);
   session.defaultSession?.cookies?.on?.('changed', signInChanged);
   pipeline.start().catch(report('launch reconcile'));
+  callPrompt.start();
 
   return Object.assign(events, {
     supervisor, pipeline,
@@ -112,6 +119,7 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
     signInMayHaveChanged: signInChanged,
     // Stop and quit: the stop and the call's final length are on disk before the app exits.
     async shutdownForQuit() {
+      callPrompt.stop();
       await supervisor.shutdownForQuit({ timeoutMs: QUIT_STOP_MS });
       connectivity.stop();
       // Cancels in-flight uploads at once, then waits (bounded) for queued work, which includes
@@ -119,6 +127,7 @@ function createDesktopRecorder({ electron, appRoot, recordingsRoot, userData, he
       await pipeline.close({ timeoutMs: QUIT_PERSIST_MS });
     },
     destroy() {
+      callPrompt.stop();
       connectivity.stop();
       session.defaultSession?.cookies?.off?.('changed', signInChanged);
       controller.destroy();
