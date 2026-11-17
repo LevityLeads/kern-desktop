@@ -48,8 +48,40 @@ jobs:
           npm run test:node
           npm run build:helper
 
-      - name: Build and publish Windows installer
+      # electron-builder uploads the installer and its .blockmap in parallel, and when no release
+      # exists yet each upload creates its own: v1.1.0 ended up as two releases for one tag. Create
+      # the one draft release up front. electron-builder finds a draft for the tag and uploads
+      # everything to it, and nothing is public until every asset is there.
+      - name: Create the draft release for this tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          IDS=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          COUNT=$(printf '%s' "$IDS" | grep -c . || true)
+          if [ "$COUNT" -gt 1 ]; then echo "More than one release already exists for $TAG"; exit 1; fi
+          if [ "$COUNT" -eq 0 ]; then
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "${TAG#v}" --notes ""
+          fi
+
+      - name: Build and upload Windows installer
         env:
           # electron-builder reads GH_TOKEN to publish the release.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx electron-builder --win --publish always
+
+      - name: Publish the release once every asset is attached
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ "$(printf '%s' "$ID" | grep -c .)" -ne 1 ]; then echo "Expected exactly one release for $TAG"; exit 1; fi
+          ASSETS=$(gh api "repos/$GITHUB_REPOSITORY/releases/$ID/assets" --jq '.[].name')
+          for NAME in "Kern-Setup-$VERSION.exe" "Kern-Setup-$VERSION.exe.blockmap" "latest.yml"; do
+            printf '%s\n' "$ASSETS" | grep -Fxq "$NAME" || { echo "Missing release asset: $NAME"; exit 1; }
+          done
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false -f make_latest=true

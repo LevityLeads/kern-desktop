@@ -31,6 +31,7 @@ class RecorderController {
       [IPC.LIST_DEVICES]: () => supervisor.listDevices(),
       [IPC.SET_MICROPHONE]: (selection) => this.microphones.set(selection),
       [IPC.SET_TRANSCRIPTION]: ({ enabled }) => settings.setEnabled(enabled),
+      [IPC.SET_CALL_PROMPT]: ({ enabled }) => settings.setCallPrompt(enabled),
       [IPC.ACKNOWLEDGE_NOTICE]: () => settings.acknowledgeNotice(),
       [IPC.START]: () => this.start(),
       [IPC.PAUSE]: () => supervisor.pause(),
